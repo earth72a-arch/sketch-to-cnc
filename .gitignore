@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-ssr
+*.local
+*.tsbuildinfo
+.DS_Store
+
+# local sketch/customer drawings must never be committed
+/samples/
+*.customer.png
