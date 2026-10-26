@@ -51,9 +51,12 @@ Procreate → Web App → Drawing Verification → 2D Technical Drawings → CNC
   dimensions are present somewhere in the sketch and needs user input to
   capture them — never infer them.
 - **Semantic information is distinguished using stroke colors**, not
-  separate layers. (Color-based classification itself is not implemented
-  until a future automated-recognition session; this rule constrains the
-  *data model*, not Phase 1 behavior.)
+  separate layers. (Deterministic color/line recognition — no AI — was
+  added in Session 2A as a Recognition Inspector: a visual QA tool that
+  classifies pixels and detects ISO-axis line segments for the user to
+  review. It is a separate debug artifact and never writes into the
+  Furniture Spec JSON, never auto-creates components/dimensions, and never
+  attaches a real-world size to a pixel measurement.)
 - **Furniture Spec JSON is the single source of truth** for all future
   drawing and manufacturing generation. Nothing downstream should re-derive
   facts that should have been captured in this JSON.

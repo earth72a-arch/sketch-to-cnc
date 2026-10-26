@@ -1,7 +1,14 @@
 import { useMemo, useState } from "react";
 import "./App.css";
 import { useProject } from "./state/ProjectContext";
-import { ImageViewer, type LoadedImage, type PlacementRequest, type ViewerMarker } from "./components/ImageViewer";
+import {
+  ImageViewer,
+  type LineOverlaySegment,
+  type LoadedImage,
+  type MaskLayer,
+  type PlacementRequest,
+  type ViewerMarker,
+} from "./components/ImageViewer";
 import { ImportPanel, type ImportResult } from "./components/ImportPanel";
 import { ViewManagerPanel } from "./components/ViewManagerPanel";
 import { ComponentEditorPanel } from "./components/ComponentEditorPanel";
@@ -11,13 +18,26 @@ import { MaterialsPanel } from "./components/MaterialsPanel";
 import { ValidationPanel } from "./components/ValidationPanel";
 import { ProjectToolbar } from "./components/ProjectToolbar";
 import { ExportBlockingPanel } from "./components/ExportBlockingPanel";
+import { RecognitionInspectorPanel } from "./components/RecognitionInspectorPanel";
 import { markerRegionCenter } from "./utils/markers";
 import { buildApprovedFurnitureSpec, triggerJsonDownload } from "./utils/serialization";
 import { slugifyFileName } from "./utils/filename";
 import type { ValidationIssue } from "./utils/validation";
 import type { Point, ProjectFile, Region } from "./types/project";
+import { createDefaultPalette } from "./recognition/palette";
+import { runRecognitionPipeline } from "./recognition/pipeline";
+import { loadPixelBufferFromUrl } from "./recognition/imageDataAdapter";
+import { buildRecognitionReport, serializeRecognitionReport } from "./recognition/report";
+import type { ColorCategory, Palette, PixelBuffer, RecognitionResult } from "./recognition/types";
 
-type Tab = "views" | "components" | "dimensions" | "spans" | "materials" | "validation";
+type Tab =
+  | "views"
+  | "components"
+  | "dimensions"
+  | "spans"
+  | "materials"
+  | "validation"
+  | "recognition";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "views", label: "Views" },
@@ -26,7 +46,12 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "spans", label: "Spans" },
   { id: "materials", label: "Materials" },
   { id: "validation", label: "Validation" },
+  { id: "recognition", label: "Recognition" },
 ];
+
+const AXIS_COLORS_HEX = ["#00bcd4", "#ff9800", "#8bc34a"];
+const UNCLASSIFIED_AXIS_COLOR_HEX = "#9e9e9e";
+const UNCLASSIFIED_MASK_COLOR = { r: 255, g: 0, b: 255 };
 
 export function App() {
   const { project, dispatch } = useProject();
@@ -39,6 +64,16 @@ export function App() {
   const [focusComponentId, setFocusComponentId] = useState<string | null>(null);
   const [exportIssues, setExportIssues] = useState<ValidationIssue[] | null>(null);
   const [exportSuccessMessage, setExportSuccessMessage] = useState<string | null>(null);
+
+  const [palette, setPalette] = useState<Palette>(createDefaultPalette());
+  const [pixelBuffer, setPixelBuffer] = useState<PixelBuffer | null>(null);
+  const [recognitionResult, setRecognitionResult] = useState<RecognitionResult | null>(null);
+  const [recognitionBusy, setRecognitionBusy] = useState(false);
+  const [recognitionError, setRecognitionError] = useState<string | null>(null);
+  const [visibleMaskCategories, setVisibleMaskCategories] = useState<Set<ColorCategory>>(new Set());
+  const [showUnclassifiedMask, setShowUnclassifiedMask] = useState(false);
+  const [showLineOverlay, setShowLineOverlay] = useState(true);
+  const [showOriginalOnly, setShowOriginalOnly] = useState(false);
 
   const dimensionMarkers = useMemo<ViewerMarker[]>(
     () =>
@@ -54,6 +89,8 @@ export function App() {
 
   function handleImported(result: ImportResult) {
     setLoadedImage(result.loadedImage);
+    setPixelBuffer(null);
+    setRecognitionResult(null);
     if (!project.sourceImage) {
       dispatch({
         type: "IMPORT_IMAGE",
@@ -77,7 +114,88 @@ export function App() {
     setLoadedImage(null);
     setMismatchWarning(null);
     setActiveViewId(null);
+    setPixelBuffer(null);
+    setRecognitionResult(null);
   }
+
+  async function handleRunRecognition() {
+    if (!loadedImage) return;
+    setRecognitionBusy(true);
+    setRecognitionError(null);
+    try {
+      let buffer = pixelBuffer;
+      if (!buffer) {
+        buffer = await loadPixelBufferFromUrl(loadedImage.url);
+        setPixelBuffer(buffer);
+      }
+      setRecognitionResult(runRecognitionPipeline(buffer, palette));
+    } catch (e) {
+      setRecognitionError(e instanceof Error ? e.message : "เกิดข้อผิดพลาดในการตรวจจับ");
+    } finally {
+      setRecognitionBusy(false);
+    }
+  }
+
+  function handleExportRecognitionReport() {
+    if (!recognitionResult) return;
+    const report = buildRecognitionReport(
+      recognitionResult,
+      {
+        fileName: project.sourceImage?.fileName ?? "unknown.png",
+        width: recognitionResult.width,
+        height: recognitionResult.height,
+        sha256: project.sourceImage?.sha256 ?? "",
+      },
+      palette,
+      { gapPx: 3, minLinearity: 0.8, minLengthPx: 8, minPixelCount: 5, maxAxisAssignDeltaDeg: 20 },
+    );
+    triggerJsonDownload(
+      `${slugifyFileName(project.projectName)}.recognition-report.json`,
+      serializeRecognitionReport(report),
+    );
+  }
+
+  function toggleMaskCategory(category: ColorCategory) {
+    setVisibleMaskCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  }
+
+  const recognitionMaskLayers = useMemo<MaskLayer[]>(() => {
+    if (tab !== "recognition" || showOriginalOnly || !recognitionResult) return [];
+    const layers: MaskLayer[] = [];
+    for (const category of visibleMaskCategories) {
+      layers.push({
+        id: category,
+        mask: recognitionResult.classification.masks[category],
+        color: palette[category].color,
+      });
+    }
+    if (showUnclassifiedMask) {
+      layers.push({
+        id: "unclassified",
+        mask: recognitionResult.classification.unclassifiedMask,
+        color: UNCLASSIFIED_MASK_COLOR,
+      });
+    }
+    return layers;
+  }, [tab, showOriginalOnly, recognitionResult, visibleMaskCategories, showUnclassifiedMask, palette]);
+
+  const recognitionLineOverlay = useMemo<LineOverlaySegment[]>(() => {
+    if (tab !== "recognition" || showOriginalOnly || !showLineOverlay || !recognitionResult) return [];
+    return recognitionResult.lines.map((line, idx) => {
+      const axisGroup = recognitionResult.axisClustering.assignments[idx];
+      return {
+        id: line.id,
+        start: line.start,
+        end: line.end,
+        colorHex: axisGroup === null ? UNCLASSIFIED_AXIS_COLOR_HEX : AXIS_COLORS_HEX[axisGroup],
+      };
+    });
+  }, [tab, showOriginalOnly, showLineOverlay, recognitionResult]);
 
   function requestRegionPlacement(onCapture: (region: Region) => void) {
     setPlacement({
@@ -182,6 +300,8 @@ export function App() {
             onCancelPlacement={() => setPlacement(null)}
             markers={dimensionMarkers}
             onSelectMarker={focusDimension}
+            maskLayers={recognitionMaskLayers}
+            lineOverlay={recognitionLineOverlay}
           />
         </section>
 
@@ -260,6 +380,28 @@ export function App() {
             )}
 
             {tab === "validation" && <ValidationPanel project={project} />}
+
+            {tab === "recognition" && (
+              <RecognitionInspectorPanel
+                image={loadedImage}
+                imageMeta={project.sourceImage ? { fileName: project.sourceImage.fileName, sha256: project.sourceImage.sha256 } : null}
+                palette={palette}
+                onPaletteChange={setPalette}
+                visibleCategories={visibleMaskCategories}
+                onToggleCategory={toggleMaskCategory}
+                showUnclassifiedMask={showUnclassifiedMask}
+                onToggleUnclassifiedMask={() => setShowUnclassifiedMask((v) => !v)}
+                showLineOverlay={showLineOverlay}
+                onToggleLineOverlay={() => setShowLineOverlay((v) => !v)}
+                showOriginalOnly={showOriginalOnly}
+                onToggleShowOriginalOnly={() => setShowOriginalOnly((v) => !v)}
+                result={recognitionResult}
+                busy={recognitionBusy}
+                error={recognitionError}
+                onRunDetection={handleRunRecognition}
+                onExportReport={handleExportRecognitionReport}
+              />
+            )}
           </div>
         </section>
       </main>

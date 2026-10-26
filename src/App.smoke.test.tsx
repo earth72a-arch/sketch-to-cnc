@@ -45,4 +45,30 @@ describe("App — mounts without throwing", () => {
     expect(container.textContent).toContain("นำเข้าภาพสเก็ตช์");
     expect(container.textContent).toContain("ยังไม่มีภาพ");
   });
+
+  it("switches to the Recognition tab without throwing (Session 2A regression)", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <ProjectProvider>
+          <App />
+        </ProjectProvider>,
+      );
+    });
+
+    const recognitionTabButton = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Recognition",
+    );
+    expect(recognitionTabButton).toBeTruthy();
+
+    act(() => {
+      recognitionTabButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("Recognition Inspector");
+    expect(container.textContent).toContain("นำเข้าภาพก่อนจึงจะใช้งาน Recognition Inspector ได้");
+  });
 });

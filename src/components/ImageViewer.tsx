@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -43,6 +44,60 @@ export type PlacementRequest =
   | { kind: "region"; onCapture: (region: Region) => void }
   | { kind: "point"; onCapture: (point: Point) => void };
 
+/** A color-classification mask rendered as a semi-transparent overlay.
+ * Purely additive/optional — omitting this prop renders exactly as before
+ * Session 2A (Views/Components/Dimensions/Spans tabs never pass it). */
+export interface MaskLayer {
+  id: string;
+  mask: Uint8Array;
+  color: { r: number; g: number; b: number };
+  opacity?: number;
+}
+
+/** A detected-line overlay segment, in original-image pixel coordinates. */
+export interface LineOverlaySegment {
+  id: string;
+  start: Point;
+  end: Point;
+  colorHex: string;
+}
+
+function MaskCanvasLayer({
+  mask,
+  width,
+  height,
+  color,
+  opacity = 0.45,
+}: {
+  mask: Uint8Array;
+  width: number;
+  height: number;
+  color: { r: number; g: number; b: number };
+  opacity?: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const imageData = ctx.createImageData(width, height);
+    const alpha = Math.round(Math.min(1, Math.max(0, opacity)) * 255);
+    for (let i = 0; i < mask.length; i++) {
+      if (!mask[i]) continue;
+      const o = i * 4;
+      imageData.data[o] = color.r;
+      imageData.data[o + 1] = color.g;
+      imageData.data[o + 2] = color.b;
+      imageData.data[o + 3] = alpha;
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }, [mask, width, height, color, opacity]);
+
+  return <canvas ref={canvasRef} width={width} height={height} className="image-viewer__mask-canvas" />;
+}
+
 interface SinglePointerState {
   startClient: Point;
   lastClient: Point;
@@ -62,6 +117,8 @@ interface ImageViewerProps {
   onCancelPlacement?: () => void;
   markers?: ViewerMarker[];
   onSelectMarker?: (id: string) => void;
+  maskLayers?: MaskLayer[];
+  lineOverlay?: LineOverlaySegment[];
 }
 
 export function ImageViewer({
@@ -72,6 +129,8 @@ export function ImageViewer({
   onCancelPlacement,
   markers = [],
   onSelectMarker,
+  maskLayers = [],
+  lineOverlay = [],
 }: ImageViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState<ViewerTransform>({
@@ -380,12 +439,34 @@ export function ImageViewer({
               onLoad={onImgLoad}
               draggable={false}
             />
+            {maskLayers.map((layer) => (
+              <MaskCanvasLayer
+                key={layer.id}
+                mask={layer.mask}
+                width={image.width}
+                height={image.height}
+                color={layer.color}
+                opacity={layer.opacity}
+              />
+            ))}
             <svg
               className="image-viewer__overlay"
               width={image.width}
               height={image.height}
               viewBox={`0 0 ${image.width} ${image.height}`}
             >
+              {lineOverlay.map((line) => (
+                <line
+                  key={line.id}
+                  x1={line.start.x}
+                  y1={line.start.y}
+                  x2={line.end.x}
+                  y2={line.end.y}
+                  stroke={line.colorHex}
+                  strokeWidth={2}
+                  className="image-viewer__detected-line"
+                />
+              ))}
               {views.map((view) => (
                 <rect
                   key={view.id}
