@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { generateId } from "../utils/id";
 import { toMillimeters } from "../utils/units";
 import { provenanceSourceForStatus } from "../utils/provenance";
+import { markerRegionCenter, pointToMarkerRegion } from "../utils/markers";
 import type {
   Component,
   Dimension,
   DimensionProperty,
   DrawingView,
   LengthUnit,
+  Point,
   Region,
   ReviewStatus,
 } from "../types/project";
@@ -40,7 +42,9 @@ interface DimensionEditorPanelProps {
   onUpdateDimension: (id: string, patch: Partial<Dimension>) => void;
   onDeleteDimension: (id: string) => void;
   onSetStatus: (id: string, status: ReviewStatus) => void;
-  onRequestRegionPlacement: (onCapture: (region: Region) => void) => void;
+  onRequestPointPlacement: (onCapture: (point: Point) => void) => void;
+  focusDimensionId?: string | null;
+  onFocusConsumed?: () => void;
 }
 
 interface FormState {
@@ -75,7 +79,9 @@ export function DimensionEditorPanel({
   onUpdateDimension,
   onDeleteDimension,
   onSetStatus,
-  onRequestRegionPlacement,
+  onRequestPointPlacement,
+  focusDimensionId,
+  onFocusConsumed,
 }: DimensionEditorPanelProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
@@ -99,6 +105,13 @@ export function DimensionEditorPanel({
       note: dim.note ?? "",
     });
   }
+
+  useEffect(() => {
+    if (!focusDimensionId) return;
+    const target = dimensions.find((d) => d.id === focusDimensionId);
+    if (target) startEdit(target);
+    onFocusConsumed?.();
+  }, [focusDimensionId]);
 
   function handleSubmit() {
     const numericValue = Number(form.value);
@@ -216,11 +229,13 @@ export function DimensionEditorPanel({
         </label>
 
         <fieldset>
-          <legend>ตำแหน่งอ้างอิงบนภาพ (Annotation Region)</legend>
+          <legend>ตำแหน่งอ้างอิงบนภาพ (Annotation Marker)</legend>
           {form.region ? (
             <p>
-              x:{Math.round(form.region.x)} y:{Math.round(form.region.y)} w:
-              {Math.round(form.region.width)} h:{Math.round(form.region.height)}
+              {(() => {
+                const center = markerRegionCenter(form.region);
+                return `ตำแหน่งจุด: x:${Math.round(center.x)} y:${Math.round(center.y)}`;
+              })()}
             </p>
           ) : (
             <p>ยังไม่ได้ระบุตำแหน่งบนภาพ</p>
@@ -228,9 +243,13 @@ export function DimensionEditorPanel({
           <button
             type="button"
             disabled={!form.viewId}
-            onClick={() => onRequestRegionPlacement((region) => setForm((prev) => ({ ...prev, region })))}
+            onClick={() =>
+              onRequestPointPlacement((point) =>
+                setForm((prev) => ({ ...prev, region: pointToMarkerRegion(point) })),
+              )
+            }
           >
-            วางตำแหน่งบนภาพ
+            แตะตำแหน่งบนภาพ
           </button>
           {!form.viewId && <small>เลือกมุมมองก่อนวางตำแหน่ง</small>}
         </fieldset>
@@ -281,6 +300,7 @@ export function DimensionEditorPanel({
                 <span className={`status-badge status-badge--${d.reviewStatus}`}>
                   {d.reviewStatus}
                 </span>
+                {d.annotation && " · 📍"}
               </button>
               {d.reviewStatus !== "confirmed" && (
                 <button type="button" onClick={() => onSetStatus(d.id, "confirmed")}>

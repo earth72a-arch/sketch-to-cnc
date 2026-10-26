@@ -1,4 +1,5 @@
 import { SCHEMA_VERSION, createSeedMaterials, type Component, type Dimension, type DimensionSpan, type DrawingView, type ProjectFile } from "../types/project";
+import { pointToMarkerRegion } from "../utils/markers";
 
 /**
  * SYNTHETIC TEST FIXTURE — Test Case 001 (wall-mounted cabinet).
@@ -88,7 +89,9 @@ export function createSyntheticTestCase001(): ProjectFile {
     normalizedValueMm: 1200,
     componentId: cabinetBody.id,
     property: "width",
-    annotation: null,
+    // Tapped on the image once, as a worked example of the marker system —
+    // intentionally still "read" (unconfirmed) even though a marker exists.
+    annotation: { viewId: assemblyView.id, region: pointToMarkerRegion({ x: 400, y: 40 }) },
     reviewStatus: "read", // needs explicit user confirmation
     provenance: { source: "user_read", timestamp: NOW },
   };

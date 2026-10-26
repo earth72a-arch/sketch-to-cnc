@@ -5,9 +5,27 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { DrawingView, Point, Region } from "../types/project";
+import { findNearestMarker } from "../utils/markers";
+import {
+  computeFitTransform,
+  distanceBetween,
+  midpoint,
+  panByScreenDelta,
+  screenToImagePoint,
+  zoomToPoint,
+  type ViewerTransform,
+} from "../utils/viewerMath";
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 12;
+
+/** Screen-space movement a single pointer may drift before a "tap" turns
+ * into a drag instead (so a slightly shaky tap still selects a marker). */
+const TAP_MOVE_THRESHOLD_PX = 8;
+
+/** Screen-space hit-test tolerance for tap-to-select-marker, converted to
+ * image space via the current zoom level at hit-test time. */
+const MARKER_TAP_TOLERANCE_SCREEN_PX = 24;
 
 export interface LoadedImage {
   url: string;
@@ -15,35 +33,25 @@ export interface LoadedImage {
   height: number;
 }
 
+export interface ViewerMarker {
+  id: string;
+  point: Point;
+  label: string;
+}
+
 export type PlacementRequest =
   | { kind: "region"; onCapture: (region: Region) => void }
   | { kind: "point"; onCapture: (point: Point) => void };
 
-interface Transform {
-  scale: number;
-  translateX: number;
-  translateY: number;
+interface SinglePointerState {
+  startClient: Point;
+  lastClient: Point;
+  moved: boolean;
 }
 
-function computeFitTransform(
-  containerW: number,
-  containerH: number,
-  imgW: number,
-  imgH: number,
-): Transform {
-  if (containerW <= 0 || containerH <= 0 || imgW <= 0 || imgH <= 0) {
-    return { scale: 1, translateX: 0, translateY: 0 };
-  }
-  const scale = Math.min(containerW / imgW, containerH / imgH);
-  return {
-    scale,
-    translateX: (containerW - imgW * scale) / 2,
-    translateY: (containerH - imgH * scale) / 2,
-  };
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
+interface TwoPointerState {
+  prevMid: Point;
+  prevDistance: number;
 }
 
 interface ImageViewerProps {
@@ -52,6 +60,8 @@ interface ImageViewerProps {
   activeViewId?: string | null;
   placement?: PlacementRequest | null;
   onCancelPlacement?: () => void;
+  markers?: ViewerMarker[];
+  onSelectMarker?: (id: string) => void;
 }
 
 export function ImageViewer({
@@ -60,21 +70,21 @@ export function ImageViewer({
   activeViewId,
   placement,
   onCancelPlacement,
+  markers = [],
+  onSelectMarker,
 }: ImageViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [transform, setTransform] = useState<Transform>({
+  const [transform, setTransform] = useState<ViewerTransform>({
     scale: 1,
     translateX: 0,
     translateY: 0,
   });
   const [dragPreview, setDragPreview] = useState<Region | null>(null);
+  const [panModeEnabled, setPanModeEnabled] = useState(false);
 
-  const pointers = useRef<Map<number, { x: number; y: number }>>(new Map());
-  const panStart = useRef<{ x: number; y: number } | null>(null);
-  const pinchStart = useRef<{
-    distance: number;
-    scale: number;
-  } | null>(null);
+  const pointers = useRef<Map<number, Point>>(new Map());
+  const singlePointer = useRef<SinglePointerState | null>(null);
+  const twoPointer = useRef<TwoPointerState | null>(null);
   const placementStart = useRef<Point | null>(null);
 
   const resetView = useCallback(() => {
@@ -94,10 +104,12 @@ export function ImageViewer({
     (clientX: number, clientY: number): Point => {
       const container = containerRef.current;
       if (!container) return { x: 0, y: 0 };
-      const rect = container.getBoundingClientRect();
-      const x = (clientX - rect.left - transform.translateX) / transform.scale;
-      const y = (clientY - rect.top - transform.translateY) / transform.scale;
-      return { x, y };
+      return screenToImagePoint(
+        transform,
+        container.getBoundingClientRect(),
+        clientX,
+        clientY,
+      );
     },
     [transform],
   );
@@ -107,16 +119,10 @@ export function ImageViewer({
       const container = containerRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
-      const nextScale = clamp(nextScaleRaw, MIN_SCALE, MAX_SCALE);
-      setTransform((prev) => {
-        const imageX = (clientX - rect.left - prev.translateX) / prev.scale;
-        const imageY = (clientY - rect.top - prev.translateY) / prev.scale;
-        return {
-          scale: nextScale,
-          translateX: clientX - rect.left - imageX * nextScale,
-          translateY: clientY - rect.top - imageY * nextScale,
-        };
-      });
+      const point = { x: clientX, y: clientY };
+      setTransform((prev) =>
+        zoomToPoint(prev, rect, point, point, nextScaleRaw, MIN_SCALE, MAX_SCALE),
+      );
     },
     [],
   );
@@ -148,44 +154,56 @@ export function ImageViewer({
     (e: ReactPointerEvent<HTMLDivElement>) => {
       (e.target as Element).setPointerCapture?.(e.pointerId);
       pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const count = pointers.current.size;
 
-      if (placement && pointers.current.size === 1) {
-        placementStart.current = screenToImage(e.clientX, e.clientY);
-        if (placement.kind === "region") {
-          setDragPreview({
-            x: placementStart.current.x,
-            y: placementStart.current.y,
-            width: 0,
-            height: 0,
-          });
+      if (placement) {
+        if (count === 1) {
+          placementStart.current = screenToImage(e.clientX, e.clientY);
+          if (placement.kind === "region") {
+            setDragPreview({
+              x: placementStart.current.x,
+              y: placementStart.current.y,
+              width: 0,
+              height: 0,
+            });
+          }
         }
         return;
       }
 
-      if (pointers.current.size === 1) {
-        panStart.current = { x: e.clientX, y: e.clientY };
-      } else if (pointers.current.size === 2) {
+      if (count === 2) {
+        singlePointer.current = null;
         const pts = [...pointers.current.values()];
-        const dx = pts[0].x - pts[1].x;
-        const dy = pts[0].y - pts[1].y;
-        pinchStart.current = {
-          distance: Math.hypot(dx, dy),
-          scale: transform.scale,
+        twoPointer.current = {
+          prevMid: midpoint(pts[0], pts[1]),
+          prevDistance: distanceBetween(pts[0], pts[1]),
         };
-        panStart.current = null;
+        return;
       }
+
+      if (count === 1) {
+        twoPointer.current = null;
+        singlePointer.current = {
+          startClient: { x: e.clientX, y: e.clientY },
+          lastClient: { x: e.clientX, y: e.clientY },
+          moved: false,
+        };
+      }
+      // 3+ simultaneous pointers: intentionally ignored (not needed, see spec).
     },
-    [placement, screenToImage, transform.scale],
+    [placement, screenToImage],
   );
 
   const onPointerMove = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       if (!pointers.current.has(e.pointerId)) return;
       pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const count = pointers.current.size;
 
-      if (placement && placementStart.current) {
-        const current = screenToImage(e.clientX, e.clientY);
-        if (placement.kind === "region") {
+      if (placement) {
+        if (placementStart.current && placement.kind === "region") {
+          e.preventDefault();
+          const current = screenToImage(e.clientX, e.clientY);
           const start = placementStart.current;
           setDragPreview({
             x: Math.min(start.x, current.x),
@@ -197,60 +215,86 @@ export function ImageViewer({
         return;
       }
 
-      if (pointers.current.size === 2) {
+      if (count === 2 && twoPointer.current) {
+        e.preventDefault();
         const pts = [...pointers.current.values()];
-        const dx = pts[0].x - pts[1].x;
-        const dy = pts[0].y - pts[1].y;
-        const distance = Math.hypot(dx, dy);
-        const midX = (pts[0].x + pts[1].x) / 2;
-        const midY = (pts[0].y + pts[1].y) / 2;
-        if (pinchStart.current && pinchStart.current.distance > 0) {
-          const nextScale =
-            pinchStart.current.scale * (distance / pinchStart.current.distance);
-          zoomAtScreenPoint(midX, midY, nextScale);
+        const curMid = midpoint(pts[0], pts[1]);
+        const curDist = distanceBetween(pts[0], pts[1]);
+        const prev = twoPointer.current;
+        const scaleRatio = prev.prevDistance > 0 ? curDist / prev.prevDistance : 1;
+
+        const container = containerRef.current;
+        if (container) {
+          const rect = container.getBoundingClientRect();
+          setTransform((t) =>
+            zoomToPoint(
+              t,
+              rect,
+              prev.prevMid,
+              curMid,
+              t.scale * scaleRatio,
+              MIN_SCALE,
+              MAX_SCALE,
+            ),
+          );
         }
+        twoPointer.current = { prevMid: curMid, prevDistance: curDist };
         return;
       }
 
-      if (pointers.current.size === 1 && panStart.current) {
-        const dx = e.clientX - panStart.current.x;
-        const dy = e.clientY - panStart.current.y;
-        panStart.current = { x: e.clientX, y: e.clientY };
-        setTransform((prev) => ({
-          ...prev,
-          translateX: prev.translateX + dx,
-          translateY: prev.translateY + dy,
-        }));
+      if (count === 1 && singlePointer.current) {
+        const sp = singlePointer.current;
+        const current = { x: e.clientX, y: e.clientY };
+        if (distanceBetween(sp.startClient, current) > TAP_MOVE_THRESHOLD_PX) {
+          sp.moved = true;
+        }
+        if (panModeEnabled) {
+          e.preventDefault();
+          const dx = current.x - sp.lastClient.x;
+          const dy = current.y - sp.lastClient.y;
+          setTransform((t) => panByScreenDelta(t, dx, dy));
+        }
+        sp.lastClient = current;
       }
     },
-    [placement, screenToImage, zoomAtScreenPoint],
+    [placement, panModeEnabled, screenToImage],
   );
 
   const finishPointer = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       pointers.current.delete(e.pointerId);
 
-      if (placement && placementStart.current) {
-        if (placement.kind === "point") {
-          placement.onCapture(screenToImage(e.clientX, e.clientY));
-        } else if (placement.kind === "region" && dragPreview) {
-          if (dragPreview.width > 2 && dragPreview.height > 2) {
-            placement.onCapture(dragPreview);
+      if (placement) {
+        if (placementStart.current) {
+          if (placement.kind === "point") {
+            placement.onCapture(screenToImage(e.clientX, e.clientY));
+          } else if (placement.kind === "region" && dragPreview) {
+            if (dragPreview.width > 2 && dragPreview.height > 2) {
+              placement.onCapture(dragPreview);
+            }
           }
+          placementStart.current = null;
+          setDragPreview(null);
         }
-        placementStart.current = null;
-        setDragPreview(null);
         return;
       }
 
+      const sp = singlePointer.current;
+      if (sp && !panModeEnabled && !sp.moved && markers.length > 0 && onSelectMarker) {
+        const tapPoint = screenToImage(e.clientX, e.clientY);
+        const toleranceImagePx = MARKER_TAP_TOLERANCE_SCREEN_PX / transform.scale;
+        const hit = findNearestMarker(markers, tapPoint, toleranceImagePx);
+        if (hit) onSelectMarker(hit.id);
+      }
+
       if (pointers.current.size < 2) {
-        pinchStart.current = null;
+        twoPointer.current = null;
       }
       if (pointers.current.size === 0) {
-        panStart.current = null;
+        singlePointer.current = null;
       }
     },
-    [placement, dragPreview, screenToImage],
+    [placement, dragPreview, screenToImage, panModeEnabled, markers, onSelectMarker, transform.scale],
   );
 
   return (
@@ -265,6 +309,18 @@ export function ImageViewer({
         <button type="button" onClick={resetView} aria-label="รีเซ็ตมุมมอง">
           รีเซ็ตมุมมอง
         </button>
+        <button
+          type="button"
+          aria-pressed={panModeEnabled}
+          className={
+            panModeEnabled
+              ? "image-viewer__toolbar-btn image-viewer__toolbar-btn--active"
+              : "image-viewer__toolbar-btn"
+          }
+          onClick={() => setPanModeEnabled((v) => !v)}
+        >
+          {panModeEnabled ? "โหมดลากภาพ: เปิด" : "โหมดลากภาพ"}
+        </button>
         {image && (
           <span className="image-viewer__dimensions">
             ขนาดภาพต้นฉบับ: {image.width} × {image.height} px · ซูม{" "}
@@ -275,10 +331,17 @@ export function ImageViewer({
           <span className="image-viewer__placement-hint">
             {placement.kind === "region"
               ? "ลากเพื่อกำหนดพื้นที่บนภาพ"
-              : "แทะหน้าจอ/คลิกเพื่อระบุจุดบนภาพ"}
+              : "แตะตำแหน่งบนภาพเพื่อระบุจุด"}
             <button type="button" onClick={onCancelPlacement}>
               ยกเลิก
             </button>
+          </span>
+        )}
+        {!placement && (
+          <span className="image-viewer__placement-hint">
+            {panModeEnabled
+              ? "หนึ่งนิ้ว/Apple Pencil ลากเพื่อเลื่อนภาพ"
+              : "สองนิ้วลาก = เลื่อนภาพ · สองนิ้วถ่าง/หุบ = ซูม · แตะ 1 นิ้ว = เลือกจุดอ้างอิง"}
           </span>
         )}
       </div>
@@ -290,7 +353,12 @@ export function ImageViewer({
         onPointerMove={onPointerMove}
         onPointerUp={finishPointer}
         onPointerCancel={finishPointer}
-        style={{ touchAction: "none" }}
+        style={{
+          touchAction: "none",
+          overscrollBehavior: "none",
+          userSelect: "none",
+          WebkitUserSelect: "none",
+        }}
       >
         {!image && (
           <div className="image-viewer__empty">ยังไม่มีภาพ — นำเข้าภาพ PNG เพื่อเริ่มต้น</div>
@@ -341,6 +409,14 @@ export function ImageViewer({
                   className="image-viewer__region image-viewer__region--drawing"
                 />
               )}
+              {markers.map((marker) => (
+                <g key={marker.id} transform={`translate(${marker.point.x}, ${marker.point.y})`}>
+                  <circle r={13} className="image-viewer__marker-dot" />
+                  <text y={4} textAnchor="middle" className="image-viewer__marker-label">
+                    {marker.label}
+                  </text>
+                </g>
+              ))}
             </svg>
           </div>
         )}

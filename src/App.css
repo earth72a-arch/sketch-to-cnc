@@ -111,6 +111,13 @@
   color: white;
 }
 
+.image-viewer__toolbar-btn--active {
+  background: #ff9800;
+  border-color: #ffb74d;
+  color: #1b1200;
+  font-weight: 600;
+}
+
 .image-viewer__dimensions,
 .image-viewer__placement-hint {
   font-size: 0.85rem;
@@ -123,6 +130,25 @@
   min-height: 300px;
   overflow: hidden;
   background: repeating-conic-gradient(#2a2f35 0% 25%, #23272c 0% 50%) 50% / 24px 24px;
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.image-viewer__marker-dot {
+  fill: #e91e63;
+  stroke: white;
+  stroke-width: 2;
+  cursor: pointer;
+}
+
+.image-viewer__marker-label {
+  font-size: 13px;
+  fill: white;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .image-viewer__empty {
@@ -371,4 +397,82 @@ button {
 .project-toolbar__message {
   font-size: 0.85rem;
   color: #c8e6c9;
+}
+
+.export-blocking-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1rem;
+  z-index: 50;
+  overflow-y: auto;
+}
+
+.export-blocking-panel {
+  background: white;
+  border-radius: 10px;
+  max-width: 560px;
+  width: 100%;
+  padding: 1.25rem;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+
+.export-blocking-panel h2 {
+  margin-top: 0;
+  color: #c62828;
+}
+
+.export-blocking-panel__close {
+  float: right;
+}
+
+.export-blocking-panel__list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.export-blocking-panel__item {
+  background: #fdecea;
+  border: 1px solid #f5c2c0;
+  border-radius: 6px;
+  padding: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.export-blocking-panel__item button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  min-height: auto;
+  font-size: 0.85rem;
+  color: #1b1f24;
+  white-space: normal;
+}
+
+.export-blocking-panel__item--navigable button {
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.export-blocking-panel__hint {
+  font-size: 0.8rem;
+  color: #5a6472;
+}
+
+.export-success-banner {
+  background: #e8f5e9;
+  border: 1px solid #66bb6a;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: #1b5e20;
 }

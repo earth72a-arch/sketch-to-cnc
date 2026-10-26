@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { generateId } from "../utils/id";
 import type {
   Component,
@@ -33,6 +33,8 @@ interface ComponentEditorPanelProps {
   onAddComponent: (component: Component) => void;
   onUpdateComponent: (id: string, patch: Partial<Component>) => void;
   onDeleteComponent: (id: string) => void;
+  focusComponentId?: string | null;
+  onFocusConsumed?: () => void;
 }
 
 interface FormState {
@@ -64,6 +66,8 @@ export function ComponentEditorPanel({
   onAddComponent,
   onUpdateComponent,
   onDeleteComponent,
+  focusComponentId,
+  onFocusConsumed,
 }: ComponentEditorPanelProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
@@ -87,6 +91,13 @@ export function ComponentEditorPanel({
     setEditingId(null);
     setForm(INITIAL_FORM);
   }
+
+  useEffect(() => {
+    if (!focusComponentId) return;
+    const target = components.find((c) => c.id === focusComponentId);
+    if (target) startEdit(target);
+    onFocusConsumed?.();
+  }, [focusComponentId]);
 
   function handleSubmit() {
     const resolvedType =

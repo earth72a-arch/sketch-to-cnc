@@ -1,23 +1,21 @@
 import { useRef, useState } from "react";
 import type { ProjectFile } from "../types/project";
-import {
-  buildApprovedFurnitureSpec,
-  parseProjectFile,
-  serializeDraftProject,
-  triggerJsonDownload,
-} from "../utils/serialization";
+import { parseProjectFile, serializeDraftProject, triggerJsonDownload } from "../utils/serialization";
+import { slugifyFileName } from "../utils/filename";
 
 interface ProjectToolbarProps {
   project: ProjectFile;
   onRename: (name: string) => void;
   onLoadProject: (project: ProjectFile) => void;
+  onExportApproved: () => void;
 }
 
-function slugifyFileName(name: string): string {
-  return name.trim().replace(/[^a-zA-Z0-9-_]+/g, "_") || "project";
-}
-
-export function ProjectToolbar({ project, onRename, onLoadProject }: ProjectToolbarProps) {
+export function ProjectToolbar({
+  project,
+  onRename,
+  onLoadProject,
+  onExportApproved,
+}: ProjectToolbarProps) {
   const loadInputRef = useRef<HTMLInputElement | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -25,21 +23,6 @@ export function ProjectToolbar({ project, onRename, onLoadProject }: ProjectTool
     const json = serializeDraftProject(project);
     triggerJsonDownload(`${slugifyFileName(project.projectName)}.draft.json`, json);
     setMessage("บันทึก Draft Project JSON แล้ว");
-  }
-
-  function handleExportApproved() {
-    const result = buildApprovedFurnitureSpec(project);
-    if (!result.ok) {
-      setMessage(
-        `ไม่สามารถส่งออก Approved Furniture Spec ได้ — พบปัญหา ${result.issues.length} รายการ (ดูแท็บ Validation)`,
-      );
-      return;
-    }
-    triggerJsonDownload(
-      `${slugifyFileName(project.projectName)}.approved.json`,
-      JSON.stringify(result.spec, null, 2),
-    );
-    setMessage("ส่งออก Approved Furniture Spec สำเร็จ");
   }
 
   async function handleLoadFile(file: File) {
@@ -83,7 +66,7 @@ export function ProjectToolbar({ project, onRename, onLoadProject }: ProjectTool
         }}
       />
 
-      <button type="button" onClick={handleExportApproved}>
+      <button type="button" onClick={onExportApproved}>
         ส่งออก Approved Furniture Spec
       </button>
 

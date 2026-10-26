@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import "./App.css";
 import { useProject } from "./state/ProjectContext";
-import { ImageViewer, type LoadedImage, type PlacementRequest } from "./components/ImageViewer";
+import { ImageViewer, type LoadedImage, type PlacementRequest, type ViewerMarker } from "./components/ImageViewer";
 import { ImportPanel, type ImportResult } from "./components/ImportPanel";
 import { ViewManagerPanel } from "./components/ViewManagerPanel";
 import { ComponentEditorPanel } from "./components/ComponentEditorPanel";
@@ -10,6 +10,11 @@ import { SpanEditorPanel } from "./components/SpanEditorPanel";
 import { MaterialsPanel } from "./components/MaterialsPanel";
 import { ValidationPanel } from "./components/ValidationPanel";
 import { ProjectToolbar } from "./components/ProjectToolbar";
+import { ExportBlockingPanel } from "./components/ExportBlockingPanel";
+import { markerRegionCenter } from "./utils/markers";
+import { buildApprovedFurnitureSpec, triggerJsonDownload } from "./utils/serialization";
+import { slugifyFileName } from "./utils/filename";
+import type { ValidationIssue } from "./utils/validation";
 import type { Point, ProjectFile, Region } from "./types/project";
 
 type Tab = "views" | "components" | "dimensions" | "spans" | "materials" | "validation";
@@ -30,6 +35,22 @@ export function App() {
   const [mismatchWarning, setMismatchWarning] = useState<{ expected: string; actual: string } | null>(null);
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
   const [placement, setPlacement] = useState<PlacementRequest | null>(null);
+  const [focusDimensionId, setFocusDimensionId] = useState<string | null>(null);
+  const [focusComponentId, setFocusComponentId] = useState<string | null>(null);
+  const [exportIssues, setExportIssues] = useState<ValidationIssue[] | null>(null);
+  const [exportSuccessMessage, setExportSuccessMessage] = useState<string | null>(null);
+
+  const dimensionMarkers = useMemo<ViewerMarker[]>(
+    () =>
+      project.dimensions
+        .filter((d) => d.annotation)
+        .map((d, index) => ({
+          id: d.id,
+          point: markerRegionCenter(d.annotation!.region),
+          label: String(index + 1),
+        })),
+    [project.dimensions],
+  );
 
   function handleImported(result: ImportResult) {
     setLoadedImage(result.loadedImage);
@@ -78,12 +99,62 @@ export function App() {
     });
   }
 
+  function focusDimension(id: string) {
+    setTab("dimensions");
+    setFocusDimensionId(id);
+  }
+
+  function focusComponent(id: string) {
+    setTab("components");
+    setFocusComponentId(id);
+  }
+
+  function handleExportApproved() {
+    const result = buildApprovedFurnitureSpec(project);
+    if (!result.ok) {
+      setExportIssues(result.issues);
+      setExportSuccessMessage(null);
+      return;
+    }
+    triggerJsonDownload(
+      `${slugifyFileName(project.projectName)}.approved.json`,
+      JSON.stringify(result.spec, null, 2),
+    );
+    setExportIssues(null);
+    setExportSuccessMessage("ส่งออก Approved Furniture Spec สำเร็จ");
+  }
+
+  function handleJumpToIssue(issue: ValidationIssue) {
+    if (issue.entityType === "dimension") {
+      focusDimension(issue.entityId);
+    } else if (issue.entityType === "component") {
+      focusComponent(issue.entityId);
+    }
+    setExportIssues(null);
+  }
+
   return (
     <div className="app">
       <header className="app__header">
         <h1>Sketch to CNC</h1>
-        <ProjectToolbar project={project} onRename={(name) => dispatch({ type: "RENAME_PROJECT", name })} onLoadProject={handleLoadProject} />
+        <ProjectToolbar
+          project={project}
+          onRename={(name) => dispatch({ type: "RENAME_PROJECT", name })}
+          onLoadProject={handleLoadProject}
+          onExportApproved={handleExportApproved}
+        />
+        {exportSuccessMessage && (
+          <span className="export-success-banner">{exportSuccessMessage}</span>
+        )}
       </header>
+
+      {exportIssues && (
+        <ExportBlockingPanel
+          issues={exportIssues}
+          onClose={() => setExportIssues(null)}
+          onJumpToIssue={handleJumpToIssue}
+        />
+      )}
 
       <main className="app__main">
         <section className="app__viewer">
@@ -109,6 +180,8 @@ export function App() {
             activeViewId={activeViewId}
             placement={placement}
             onCancelPlacement={() => setPlacement(null)}
+            markers={dimensionMarkers}
+            onSelectMarker={focusDimension}
           />
         </section>
 
@@ -147,6 +220,8 @@ export function App() {
                 onAddComponent={(component) => dispatch({ type: "ADD_COMPONENT", component })}
                 onUpdateComponent={(id, patch) => dispatch({ type: "UPDATE_COMPONENT", id, patch })}
                 onDeleteComponent={(id) => dispatch({ type: "DELETE_COMPONENT", id })}
+                focusComponentId={focusComponentId}
+                onFocusConsumed={() => setFocusComponentId(null)}
               />
             )}
 
@@ -159,7 +234,9 @@ export function App() {
                 onUpdateDimension={(id, patch) => dispatch({ type: "UPDATE_DIMENSION", id, patch })}
                 onDeleteDimension={(id) => dispatch({ type: "DELETE_DIMENSION", id })}
                 onSetStatus={(id, status) => dispatch({ type: "SET_DIMENSION_STATUS", id, status })}
-                onRequestRegionPlacement={requestRegionPlacement}
+                onRequestPointPlacement={requestPointPlacement}
+                focusDimensionId={focusDimensionId}
+                onFocusConsumed={() => setFocusDimensionId(null)}
               />
             )}
 

@@ -82,4 +82,28 @@ describe("Approved Furniture Spec export blocking", () => {
     expect(() => serializeDraftProject(project)).not.toThrow();
     expect(buildApprovedFurnitureSpec(project).ok).toBe(false);
   });
+
+  it("blocking issues reference real dimension/component ids so the UI can navigate to them", () => {
+    // Regression for the "approved export gives no feedback" bug: the
+    // issues returned here are exactly what the export-blocking panel
+    // renders and lets the user tap to jump to the offending record.
+    const project = createSyntheticTestCase001();
+    const result = buildApprovedFurnitureSpec(project);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+
+    const dimensionIds = new Set(project.dimensions.map((d) => d.id));
+    const componentIds = new Set(project.components.map((c) => c.id));
+
+    const navigable = result.issues.filter(
+      (i) => i.entityType === "dimension" || i.entityType === "component",
+    );
+    expect(navigable.length).toBeGreaterThan(0);
+    for (const issue of navigable) {
+      const exists =
+        (issue.entityType === "dimension" && dimensionIds.has(issue.entityId)) ||
+        (issue.entityType === "component" && componentIds.has(issue.entityId));
+      expect(exists).toBe(true);
+    }
+  });
 });
