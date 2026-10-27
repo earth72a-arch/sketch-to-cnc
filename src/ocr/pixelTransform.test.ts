@@ -86,3 +86,26 @@ describe("extractOrientedCrop", () => {
     expect(() => extractOrientedCrop(buffer, { x: 0, y: 0, width: 5, height: 5 }, 4, 45)).not.toThrow();
   });
 });
+
+describe("Session 2B.1 — zero-size / degenerate region safety", () => {
+  it("cropPixelBuffer does not throw for a zero-width/zero-height region and still returns a usable buffer", () => {
+    const buffer = solidBuffer(40, 40, [1, 2, 3]);
+    const cropped = cropPixelBuffer(buffer, { x: 10, y: 10, width: 0, height: 0 });
+    expect(cropped.width).toBeGreaterThanOrEqual(1);
+    expect(cropped.height).toBeGreaterThanOrEqual(1);
+    expect(cropped.data.length).toBe(cropped.width * cropped.height * 4);
+  });
+
+  it("padRegion does not throw and returns a non-degenerate region for a zero-size input", () => {
+    const padded = padRegion({ x: 5, y: 5, width: 0, height: 0 }, 2, 100, 100);
+    expect(padded.width).toBeGreaterThanOrEqual(1);
+    expect(padded.height).toBeGreaterThanOrEqual(1);
+  });
+
+  it("extractOrientedCrop handles a zero-size manually-drawn region without throwing, at any orientation", () => {
+    const buffer = solidBuffer(40, 40, [9, 9, 9]);
+    for (const angle of [0, 45, 90]) {
+      expect(() => extractOrientedCrop(buffer, { x: 20, y: 20, width: 0, height: 0 }, 4, angle)).not.toThrow();
+    }
+  });
+});

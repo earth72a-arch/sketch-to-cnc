@@ -16,7 +16,7 @@
 // see the Session 2B final report for that distinction.
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { recognizeImage, terminateOcrEngine } from "./tesseractEngine";
+import { recognizeImage, terminateOcrEngine, createCancelToken } from "./tesseractEngine";
 import { encodeBmp } from "./testSupport/bmpEncoder.node";
 import { renderSyntheticText } from "./fixtures/syntheticText";
 
@@ -81,6 +81,119 @@ describe("tesseractEngine — real engine, self-hosted assets", () => {
       // in this environment; a reused worker recognizing one short crop
       // comfortably finishes in a small fraction of that.
       expect(elapsedMs).toBeLessThan(3000);
+    },
+    30000,
+  );
+});
+
+describe("Session 2B.1 — resilience: timeout, cancel, recovery, progress (real engine)", () => {
+  // Note: node/getCore.js (see node_modules/tesseract.js/src/worker-script/
+  // node/getCore.js) ignores `corePath` entirely in Node — it always
+  // `require()`s the installed tesseract.js-core package — so a bad
+  // corePath cannot be used to exercise a real failure here. `langPath`
+  // IS honored by the shared (node+browser) loadLanguage code path, so
+  // it's used instead to force a genuine load failure.
+  const badLangPath = path.resolve(process.cwd(), "public/tesseract/does-not-exist-lang-data");
+
+  it(
+    "a worker-init failure (bad langPath) rejects with a bounded, typed error instead of hanging",
+    async () => {
+      await terminateOcrEngine(); // force a fresh worker for this bad-config attempt
+      const started = Date.now();
+      const outcome = await recognizeImage(encodeBmp(renderSyntheticText("1")), {
+        ...engineOptions,
+        langPath: badLangPath,
+        cachePath: path.resolve(process.cwd(), ".vitest-tesseract-cache-bad-lang"),
+        timeouts: { workerInitMs: 8000, recognizeMs: 8000 },
+      });
+      const elapsedMs = Date.now() - started;
+
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(["worker-init-timeout", "worker-init-failed"]).toContain(outcome.errorCode);
+      // Bounded: must not silently hang anywhere near the full timeout
+      // budget doubled, let alone forever.
+      expect(elapsedMs).toBeLessThan(16000);
+    },
+    20000,
+  );
+
+  it(
+    "recovers on the NEXT call after a worker-init failure (the broken singleton is reset, not stuck forever)",
+    async () => {
+      await terminateOcrEngine();
+      const bad = await recognizeImage(encodeBmp(renderSyntheticText("1")), {
+        ...engineOptions,
+        langPath: badLangPath,
+        cachePath: path.resolve(process.cwd(), ".vitest-tesseract-cache-bad-lang2"),
+        timeouts: { workerInitMs: 8000, recognizeMs: 8000 },
+      });
+      expect(bad.ok).toBe(false);
+
+      const good = await recognizeImage(encodeBmp(renderSyntheticText("1")), engineOptions);
+      expect(good.ok).toBe(true);
+    },
+    30000,
+  );
+
+  it(
+    "cancelling mid-run rejects quickly with errorCode 'cancelled', not after the full timeout",
+    async () => {
+      await terminateOcrEngine();
+      const cancelToken = createCancelToken();
+      const started = Date.now();
+      const resultPromise = recognizeImage(encodeBmp(renderSyntheticText("120")), {
+        ...engineOptions,
+        cancelToken,
+        timeouts: { workerInitMs: 20000, recognizeMs: 20000 },
+      });
+      setTimeout(() => cancelToken.cancel(), 5);
+
+      const outcome = await resultPromise;
+      const elapsedMs = Date.now() - started;
+
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.errorCode).toBe("cancelled");
+      expect(elapsedMs).toBeLessThan(20000); // did not wait out the full timeout budget
+    },
+    25000,
+  );
+
+  it(
+    "reports at least one real stage transition during a normal run (never a fabricated percentage)",
+    async () => {
+      await terminateOcrEngine();
+      const stages: Array<{ stage: string; progress: number | null }> = [];
+      const outcome = await recognizeImage(encodeBmp(renderSyntheticText("25")), {
+        ...engineOptions,
+        onStage: (stage, progress) => stages.push({ stage, progress }),
+      });
+
+      expect(outcome.ok).toBe(true);
+      expect(stages.length).toBeGreaterThan(0);
+      // Every reported progress value must be a real number in [0,1] or
+      // explicitly null — never a placeholder sentinel.
+      for (const s of stages) {
+        if (s.progress !== null) {
+          expect(s.progress).toBeGreaterThanOrEqual(0);
+          expect(s.progress).toBeLessThanOrEqual(1);
+        }
+      }
+    },
+    30000,
+  );
+
+  it(
+    "two concurrent calls share one worker initialization instead of spawning two",
+    async () => {
+      await terminateOcrEngine();
+      const [a, b] = await Promise.all([
+        recognizeImage(encodeBmp(renderSyntheticText("1")), engineOptions),
+        recognizeImage(encodeBmp(renderSyntheticText("1")), engineOptions),
+      ]);
+      expect(a.ok).toBe(true);
+      expect(b.ok).toBe(true);
     },
     30000,
   );

@@ -3,7 +3,8 @@ import { extractOrientedCrop } from "./pixelTransform";
 import { buildOrientationCandidates } from "./orientationCandidates";
 import { parseDimensionText } from "./parseDimensionText";
 import { recognizeImage, type TesseractEngineOptions } from "./tesseractEngine";
-import { MIN_CONFIDENCE_FOR_READ, type OcrAlternative, type OcrCandidate, type TextRegionCandidate } from "./types";
+import { MIN_CONFIDENCE_FOR_READ, type OcrAlternative, type OcrCandidate, type OcrStage, type TextRegionCandidate } from "./types";
+import type { CancelToken } from "./withTimeout";
 import { generateId } from "../utils/id";
 import type Tesseract from "tesseract.js";
 
@@ -24,6 +25,14 @@ export interface RecognizeTextRegionsOptions {
    * differently-worded runner-up are BOTH kept/flagged instead of
    * silently picking a "winner" (Session 2B §7). */
   ambiguousConfidenceMarginPts: number;
+  /** Session 2B.1: shared cancel token for the whole run — checked
+   * between regions (stops starting new work) and forwarded into every
+   * engine call (aborts in-flight work too). */
+  cancelToken?: CancelToken;
+  /** Session 2B.1: reports stage/progress/region-index changes as they
+   * happen, so the UI can show real diagnostics instead of a single
+   * stuck percentage. */
+  onDiagnostics?: (stage: OcrStage, progress: number | null, regionIndex: number | null, regionTotal: number | null) => void;
 }
 
 export const DEFAULT_RECOGNIZE_OPTIONS: Pick<
@@ -43,18 +52,31 @@ interface Attempt {
 async function recognizeOneRegion(
   buffer: PixelBuffer,
   region: TextRegionCandidate,
+  regionIndex: number,
+  regionTotal: number,
   options: RecognizeTextRegionsOptions,
 ): Promise<OcrCandidate> {
   const angles = buildOrientationCandidates(options.isoAxisCentroidsDeg);
   const attempts: Attempt[] = [];
   const engineErrors: string[] = [];
+  let fatalErrorCode: string | null = null;
 
   for (const angle of angles) {
+    if (options.cancelToken?.isCancelled()) break;
+
     const oriented = extractOrientedCrop(buffer, region.region, options.cropPaddingPx, angle);
     const image = options.toImageLike(oriented);
-    const outcome = await recognizeImage(image, options.engineOptions);
+    const outcome = await recognizeImage(image, {
+      ...options.engineOptions,
+      cancelToken: options.cancelToken,
+      onStage: (stage, progress) => options.onDiagnostics?.(stage, progress, regionIndex, regionTotal),
+    });
     if (!outcome.ok) {
       engineErrors.push(`${angle}deg: ${outcome.errorMessage}`);
+      if (outcome.errorCode === "cancelled") {
+        fatalErrorCode = "cancelled";
+        break;
+      }
       continue;
     }
     const text = outcome.text.trim();
@@ -66,6 +88,7 @@ async function recognizeOneRegion(
   const best = attempts[0];
 
   if (!best) {
+    const cancelled = fatalErrorCode === "cancelled";
     return {
       id: generateId("ocr-candidate"),
       region,
@@ -77,10 +100,11 @@ async function recognizeOneRegion(
       alternatives: [],
       status: "ambiguous",
       sourceImageSha256: options.sourceImageSha256,
-      note:
-        engineErrors.length > 0
-          ? `ไม่พบข้อความที่อ่านได้ในทุกมุมที่ลอง (engine: ${engineErrors[0]})`
-          : "ไม่พบข้อความที่อ่านได้ในบริเวณนี้ในทุกมุมที่ลอง",
+      note: cancelled
+        ? "ยกเลิกก่อนอ่านบริเวณนี้สำเร็จ"
+        : engineErrors.length > 0
+          ? `OCR ไม่พบข้อความในบริเวณนี้ — engine รายงานปัญหา: ${engineErrors[0]}`
+          : "OCR ไม่พบข้อความในบริเวณนี้ (ลองทุกมุมแล้ว)",
     };
   }
 
@@ -122,8 +146,9 @@ export async function recognizeTextRegions(
   options: RecognizeTextRegionsOptions,
 ): Promise<OcrCandidate[]> {
   const results: OcrCandidate[] = [];
-  for (const region of regions) {
-    results.push(await recognizeOneRegion(buffer, region, options));
+  for (let i = 0; i < regions.length; i++) {
+    if (options.cancelToken?.isCancelled()) break;
+    results.push(await recognizeOneRegion(buffer, regions[i], i + 1, regions.length, options));
   }
   return results;
 }

@@ -114,3 +114,75 @@ export const DEFAULT_OCR_REGION_OPTIONS: OcrRegionDetectionOptions = {
   minClusterPixelCount: 6,
   maxClusterAreaFraction: 0.1,
 };
+
+/**
+ * Session 2B.1 — user-visible OCR stages. Every stage the UI can show
+ * must be one of these; there is no "generic 0%" fallback. `progress`
+ * on the diagnostics record is `null` whenever the engine did not
+ * report a real number for the current stage — the UI must render that
+ * as "no percentage available," never as a fabricated 0%.
+ */
+export type OcrStage =
+  | "idle"
+  | "preparing-image"
+  | "detecting-regions"
+  | "initializing-worker"
+  | "loading-core"
+  | "loading-language"
+  | "recognizing"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface OcrDiagnostics {
+  stage: OcrStage;
+  /** 0-1 engine-reported progress for the CURRENT stage, or null if the
+   * engine has not reported one — never a placeholder/fake value. */
+  progress: number | null;
+  /** 1-based index of the region currently being recognized, null
+   * outside the "recognizing" stage. */
+  regionIndex: number | null;
+  regionTotal: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export const IDLE_OCR_DIAGNOSTICS: OcrDiagnostics = {
+  stage: "idle",
+  progress: null,
+  regionIndex: null,
+  regionTotal: null,
+  errorCode: null,
+  errorMessage: null,
+};
+
+/** Per-stage timeouts (ms) — configurable, never used as a silent
+ * "problem solved" substitute for the real fix (Session 2B.1 §4): a
+ * timeout firing is always surfaced to the user as a `failed` stage
+ * with an explicit error code/message, not swallowed. */
+export interface OcrTimeoutConfig {
+  workerInitMs: number;
+  recognizeMs: number;
+}
+
+export const DEFAULT_OCR_TIMEOUTS: OcrTimeoutConfig = {
+  workerInitMs: 45000,
+  recognizeMs: 25000,
+};
+
+/**
+ * Guard limits for Automatic OCR (Session 2B.1 §6) — a real sketch can
+ * contain far more "dimension-colored ink clusters" than are actually
+ * numbers (stray marks, a misconfigured palette, etc.). These bound the
+ * worst case instead of silently dropping regions with no explanation;
+ * see textRegionGuard.ts for how a violation is reported to the user.
+ */
+export interface OcrAutoRunGuardLimits {
+  maxRegions: number;
+  maxRegionAreaPx: number;
+}
+
+export const DEFAULT_OCR_GUARD_LIMITS: OcrAutoRunGuardLimits = {
+  maxRegions: 60,
+  maxRegionAreaPx: 2_000_000, // a single text region bigger than this is almost certainly a mis-detected non-text blob, not a number
+};

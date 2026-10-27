@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { useProject } from "./state/ProjectContext";
 import {
@@ -35,10 +35,18 @@ import { buildRecognitionReport, serializeRecognitionReport } from "./recognitio
 import type { ColorCategory, Palette, PixelBuffer, RecognitionResult } from "./recognition/types";
 import { detectDimensionTextRegions, createManualTextRegion } from "./ocr/textRegionDetection";
 import { DEFAULT_RECOGNIZE_OPTIONS, recognizeTextRegions } from "./ocr/ocrPipeline";
-import { terminateOcrEngine } from "./ocr/tesseractEngine";
+import { terminateOcrEngine, createCancelToken, type CancelToken } from "./ocr/tesseractEngine";
 import { pixelBufferToOffscreenCanvas } from "./ocr/canvasImageAdapter";
 import { buildOcrDebugReport, serializeOcrDebugReport } from "./ocr/report";
-import type { OcrCandidate } from "./ocr/types";
+import { applyAutoRunGuard } from "./ocr/textRegionGuard";
+import {
+  DEFAULT_OCR_GUARD_LIMITS,
+  DEFAULT_OCR_TIMEOUTS,
+  IDLE_OCR_DIAGNOSTICS,
+  type OcrCandidate,
+  type OcrDiagnostics,
+  type TextRegionCandidate,
+} from "./ocr/types";
 
 const TESSERACT_WORKER_PATH = `${import.meta.env.BASE_URL}tesseract/worker.min.js`;
 const TESSERACT_CORE_PATH = `${import.meta.env.BASE_URL}tesseract/core/tesseract-core-lstm.js`;
@@ -92,9 +100,25 @@ export function App() {
   const [ocrCandidates, setOcrCandidates] = useState<OcrCandidate[]>([]);
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrError, setOcrError] = useState<string | null>(null);
-  const [ocrProgress, setOcrProgress] = useState<{ status: string; progress: number } | null>(null);
+  const [ocrDiagnostics, setOcrDiagnostics] = useState<OcrDiagnostics>(IDLE_OCR_DIAGNOSTICS);
+  const [ocrElapsedMs, setOcrElapsedMs] = useState(0);
+  const [ocrGuardMessage, setOcrGuardMessage] = useState<string | null>(null);
   const [ocrSelectedCandidateId, setOcrSelectedCandidateId] = useState<string | null>(null);
   const [ocrProcessingTimeMs, setOcrProcessingTimeMs] = useState(0);
+  // Session 2B.1: a monotonically increasing "run id." Any OCR work in
+  // flight checks this when it's about to write results; if the image
+  // changed (or a newer run started) since it began, its generation no
+  // longer matches and its result is discarded instead of landing late
+  // and silently overwriting/mixing with newer state.
+  const ocrGenerationRef = useRef(0);
+  const ocrCancelTokenRef = useRef<CancelToken | null>(null);
+  const ocrStartedAtRef = useRef<number | null>(null);
+  // Synchronous re-entrancy gate: `ocrBusy` (React state) only reflects
+  // reality AFTER the next render, so two clicks dispatched in the same
+  // tick could both read it as `false`. This ref is set/cleared
+  // immediately, with no render delay, so a double-click can never
+  // start two runs regardless of React's update timing.
+  const ocrBusyRef = useRef(false);
 
   const dimensionMarkers = useMemo<ViewerMarker[]>(
     () =>
@@ -108,10 +132,28 @@ export function App() {
     [project.dimensions],
   );
 
+  function resetOcrStateForNewImage() {
+    // Session 2B.1 §4 "Resource cleanup เมื่อเปลี่ยนภาพ": abandon any
+    // in-flight OCR run (its generation will no longer match, so a late
+    // result cannot land), release the worker, and clear results that
+    // referred to the previous image.
+    ocrGenerationRef.current += 1;
+    ocrCancelTokenRef.current?.cancel();
+    ocrCancelTokenRef.current = null;
+    ocrBusyRef.current = false;
+    void terminateOcrEngine();
+    setOcrCandidates([]);
+    setOcrBusy(false);
+    setOcrDiagnostics(IDLE_OCR_DIAGNOSTICS);
+    setOcrError(null);
+    setOcrGuardMessage(null);
+  }
+
   function handleImported(result: ImportResult) {
     setLoadedImage(result.loadedImage);
     setPixelBuffer(null);
     setRecognitionResult(null);
+    resetOcrStateForNewImage();
     if (!project.sourceImage) {
       dispatch({
         type: "IMPORT_IMAGE",
@@ -137,7 +179,28 @@ export function App() {
     setActiveViewId(null);
     setPixelBuffer(null);
     setRecognitionResult(null);
+    resetOcrStateForNewImage();
   }
+
+  // Session 2B.1 §4 "Resource cleanup ... เมื่อ unmount": release the
+  // OCR worker/WASM memory if the app itself ever unmounts.
+  useEffect(() => {
+    return () => {
+      ocrCancelTokenRef.current?.cancel();
+      void terminateOcrEngine();
+    };
+  }, []);
+
+  // Elapsed-time ticking for the diagnostics panel — ticks only while
+  // an OCR run is actually in flight, so the UI never has to fabricate
+  // a percentage just to show the user something is still happening.
+  useEffect(() => {
+    if (!ocrBusy) return;
+    const interval = setInterval(() => {
+      if (ocrStartedAtRef.current !== null) setOcrElapsedMs(Date.now() - ocrStartedAtRef.current);
+    }, 200);
+    return () => clearInterval(interval);
+  }, [ocrBusy]);
 
   async function handleRunRecognition() {
     if (!loadedImage) return;
@@ -184,70 +247,107 @@ export function App() {
     return buffer;
   }
 
-  async function handleRunOcrAutoDetection() {
-    if (!loadedImage || !recognitionResult) return;
+  function baseOcrEngineOptions(cancelToken: CancelToken) {
+    return {
+      workerPath: TESSERACT_WORKER_PATH,
+      corePath: TESSERACT_CORE_PATH,
+      langPath: TESSERACT_LANG_PATH,
+      timeouts: DEFAULT_OCR_TIMEOUTS,
+      cancelToken,
+    };
+  }
+
+  /** Runs one OCR job against `regions`, shared by both the automatic
+   * and manual-region entry points (Session 2B.1 §5: manual must work
+   * independently of automatic detection, but both share this same
+   * well-tested diagnostics/cancel/stale-result machinery). */
+  async function runOcrJob(regions: TextRegionCandidate[]) {
+    // Synchronous re-entrancy guard — see §4 "ป้องกันการกด OCR ซ้ำ". Uses
+    // a ref, not the `ocrBusy` state, because two clicks in the same
+    // tick would both still see the pre-update state value.
+    if (ocrBusyRef.current) return;
+    ocrBusyRef.current = true;
+    const myGeneration = ++ocrGenerationRef.current;
+    const cancelToken = createCancelToken();
+    ocrCancelTokenRef.current = cancelToken;
+
     setOcrBusy(true);
     setOcrError(null);
-    setOcrProgress(null);
-    const started = Date.now();
+    setOcrGuardMessage(null);
+    ocrStartedAtRef.current = Date.now();
+    setOcrElapsedMs(0);
+    setOcrDiagnostics({ ...IDLE_OCR_DIAGNOSTICS, stage: "preparing-image" });
+
     try {
       const buffer = await ensurePixelBuffer();
-      if (!buffer) return;
-      const regions = detectDimensionTextRegions(
-        recognitionResult.classification.masks.dimension,
-        buffer.width,
-        buffer.height,
-      );
+      if (ocrGenerationRef.current !== myGeneration) return; // image/run changed mid-flight
+      if (!buffer) {
+        setOcrDiagnostics({ ...IDLE_OCR_DIAGNOSTICS, stage: "failed", errorCode: "no-image", errorMessage: "ไม่มีภาพให้ประมวลผล" });
+        return;
+      }
+
       const newCandidates = await recognizeTextRegions(buffer, regions, {
         ...DEFAULT_RECOGNIZE_OPTIONS,
-        isoAxisCentroidsDeg: recognitionResult.axisClustering.axisCentroidsDeg,
+        isoAxisCentroidsDeg: recognitionResult?.axisClustering.axisCentroidsDeg ?? null,
         sourceImageSha256: project.sourceImage?.sha256 ?? "",
         toImageLike: pixelBufferToOffscreenCanvas,
-        engineOptions: {
-          workerPath: TESSERACT_WORKER_PATH,
-          corePath: TESSERACT_CORE_PATH,
-          langPath: TESSERACT_LANG_PATH,
-          onProgress: (status, progressValue) => setOcrProgress({ status, progress: progressValue }),
+        cancelToken,
+        engineOptions: baseOcrEngineOptions(cancelToken),
+        onDiagnostics: (stage, progress, regionIndex, regionTotal) => {
+          if (ocrGenerationRef.current !== myGeneration) return;
+          setOcrDiagnostics({ stage, progress, regionIndex, regionTotal, errorCode: null, errorMessage: null });
         },
       });
+
+      if (ocrGenerationRef.current !== myGeneration) return; // stale — a newer run/image superseded this one
       setOcrCandidates((prev) => [...prev, ...newCandidates]);
+      setOcrDiagnostics({
+        stage: cancelToken.isCancelled() ? "cancelled" : "completed",
+        progress: null,
+        regionIndex: null,
+        regionTotal: regions.length,
+        errorCode: null,
+        errorMessage: null,
+      });
     } catch (e) {
-      setOcrError(e instanceof Error ? e.message : "เกิดข้อผิดพลาดในการอ่าน OCR");
+      if (ocrGenerationRef.current !== myGeneration) return;
+      const message = e instanceof Error ? e.message : "เกิดข้อผิดพลาดในการอ่าน OCR";
+      setOcrError(message);
+      setOcrDiagnostics({ stage: "failed", progress: null, regionIndex: null, regionTotal: null, errorCode: "unexpected", errorMessage: message });
     } finally {
-      setOcrProcessingTimeMs((prev) => prev + (Date.now() - started));
-      setOcrBusy(false);
-      setOcrProgress(null);
+      ocrBusyRef.current = false;
+      if (ocrGenerationRef.current === myGeneration) {
+        setOcrProcessingTimeMs((prev) => prev + (Date.now() - (ocrStartedAtRef.current ?? Date.now())));
+        setOcrBusy(false);
+      }
     }
+  }
+
+  async function handleRunOcrAutoDetection() {
+    if (!loadedImage || !recognitionResult) return;
+    const buffer = await ensurePixelBuffer();
+    if (!buffer) return;
+    setOcrDiagnostics({ ...IDLE_OCR_DIAGNOSTICS, stage: "detecting-regions" });
+    const detected = detectDimensionTextRegions(recognitionResult.classification.masks.dimension, buffer.width, buffer.height);
+    const guarded = applyAutoRunGuard(detected, DEFAULT_OCR_GUARD_LIMITS);
+    if (guarded.message) setOcrGuardMessage(guarded.message);
+    await runOcrJob(guarded.accepted);
   }
 
   function handleRequestManualOcrRegion() {
     requestRegionPlacement(async (region) => {
-      setOcrBusy(true);
-      setOcrError(null);
-      const started = Date.now();
-      try {
-        const buffer = await ensurePixelBuffer();
-        if (!buffer) return;
-        const manualRegion = createManualTextRegion(region);
-        const newCandidates = await recognizeTextRegions(buffer, [manualRegion], {
-          ...DEFAULT_RECOGNIZE_OPTIONS,
-          isoAxisCentroidsDeg: recognitionResult?.axisClustering.axisCentroidsDeg ?? null,
-          sourceImageSha256: project.sourceImage?.sha256 ?? "",
-          toImageLike: pixelBufferToOffscreenCanvas,
-          engineOptions: {
-            workerPath: TESSERACT_WORKER_PATH,
-            corePath: TESSERACT_CORE_PATH,
-            langPath: TESSERACT_LANG_PATH,
-          },
-        });
-        setOcrCandidates((prev) => [...prev, ...newCandidates]);
-      } catch (e) {
-        setOcrError(e instanceof Error ? e.message : "เกิดข้อผิดพลาดในการอ่าน OCR");
-      } finally {
-        setOcrProcessingTimeMs((prev) => prev + (Date.now() - started));
-        setOcrBusy(false);
+      if (region.width < 2 || region.height < 2) {
+        setOcrError("บริเวณที่เลือกเล็กเกินไป กรุณาลากกรอบให้ครอบตัวเลขให้ชัดเจน");
+        return;
       }
+      await runOcrJob([createManualTextRegion(region)]);
     });
+  }
+
+  function handleCancelOcr() {
+    ocrCancelTokenRef.current?.cancel();
+    setOcrDiagnostics((prev) => ({ ...prev, stage: "cancelled" }));
+    void terminateOcrEngine();
   }
 
   function handleUpdateOcrCandidate(
@@ -581,10 +681,13 @@ export function App() {
                 hasRecognitionResult={!!recognitionResult}
                 candidates={ocrCandidates}
                 busy={ocrBusy}
-                progress={ocrProgress}
+                diagnostics={ocrDiagnostics}
+                elapsedMs={ocrElapsedMs}
+                guardMessage={ocrGuardMessage}
                 error={ocrError}
                 onRunAutoDetection={handleRunOcrAutoDetection}
                 onRequestManualRegion={handleRequestManualOcrRegion}
+                onCancel={handleCancelOcr}
                 onUpdateCandidate={handleUpdateOcrCandidate}
                 onTransferToDraftDimension={handleTransferOcrCandidateToDraftDimension}
                 onExportReport={handleExportOcrReport}

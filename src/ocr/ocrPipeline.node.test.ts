@@ -8,7 +8,7 @@
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { recognizeTextRegions, DEFAULT_RECOGNIZE_OPTIONS } from "./ocrPipeline";
-import { terminateOcrEngine } from "./tesseractEngine";
+import { terminateOcrEngine, createCancelToken } from "./tesseractEngine";
 import { detectDimensionTextRegions, createManualTextRegion } from "./textRegionDetection";
 import { encodeBmp } from "./testSupport/bmpEncoder.node";
 import { renderSyntheticText, pastePixelBuffer } from "./fixtures/syntheticText";
@@ -211,6 +211,36 @@ describe("Session 2B end-to-end — real color mask + real OCR engine", () => {
 
       expect(candidate.status).not.toBe("confirmed");
       expect(candidate.parsedValue).toBeNull();
+    },
+    30000,
+  );
+});
+
+describe("Session 2B.1 — cancelling a multi-region run", () => {
+  it(
+    "stops starting new regions once cancelled, instead of silently finishing the whole batch",
+    async () => {
+      const regions = [
+        createManualTextRegion({ x: 0, y: 0, width: 20, height: 20 }),
+        createManualTextRegion({ x: 0, y: 0, width: 20, height: 20 }),
+        createManualTextRegion({ x: 0, y: 0, width: 20, height: 20 }),
+      ];
+      const buffer = createBlankBuffer(60, 60);
+      const cancelToken = createCancelToken();
+      cancelToken.cancel(); // cancelled before the run even starts
+
+      const results = await recognizeTextRegions(buffer, regions, {
+        ...DEFAULT_RECOGNIZE_OPTIONS,
+        isoAxisCentroidsDeg: null,
+        sourceImageSha256: "cancel-test".padEnd(64, "0"),
+        toImageLike,
+        cancelToken,
+        engineOptions,
+      });
+
+      // A token cancelled up-front must stop the whole run from ever
+      // producing region attempts, not process all 3 anyway.
+      expect(results.length).toBeLessThan(regions.length);
     },
     30000,
   );

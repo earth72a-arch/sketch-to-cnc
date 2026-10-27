@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { OcrCandidate, OcrCandidateStatus, OcrUnit, TextRegionCandidate } from "../ocr/types";
+import type { OcrCandidate, OcrCandidateStatus, OcrDiagnostics, OcrStage, OcrUnit, TextRegionCandidate } from "../ocr/types";
 import type { LoadedImage } from "./ImageViewer";
 
 interface OcrInspectorPanelProps {
@@ -7,10 +7,13 @@ interface OcrInspectorPanelProps {
   hasRecognitionResult: boolean;
   candidates: OcrCandidate[];
   busy: boolean;
-  progress: { status: string; progress: number } | null;
+  diagnostics: OcrDiagnostics;
+  elapsedMs: number;
+  guardMessage: string | null;
   error: string | null;
   onRunAutoDetection: () => void;
   onRequestManualRegion: () => void;
+  onCancel: () => void;
   onUpdateCandidate: (id: string, patch: Partial<Pick<OcrCandidate, "userValue" | "userUnit" | "status" | "note">>) => void;
   onTransferToDraftDimension: (candidate: OcrCandidate) => void;
   onExportReport: () => void;
@@ -25,6 +28,69 @@ const STATUS_LABEL_TH: Record<OcrCandidateStatus, string> = {
   confirmed: "ผู้ใช้ยืนยันว่าถูกต้อง",
   rejected: "ปฏิเสธ (false positive)",
 };
+
+const STAGE_LABEL_TH: Record<OcrStage, string> = {
+  idle: "ยังไม่เริ่ม",
+  "preparing-image": "กำลังเตรียมภาพ",
+  "detecting-regions": "กำลังหาบริเวณข้อความ",
+  "initializing-worker": "กำลังเริ่ม OCR Worker",
+  "loading-core": "กำลังโหลด WASM Core",
+  "loading-language": "กำลังโหลดโมเดลภาษา",
+  recognizing: "กำลังอ่านข้อความ",
+  completed: "เสร็จสิ้น",
+  failed: "ล้มเหลว",
+  cancelled: "ยกเลิกแล้ว",
+};
+
+function formatElapsed(ms: number): string {
+  return `${(ms / 1000).toFixed(1)} วินาที`;
+}
+
+function DiagnosticsPanel({
+  diagnostics,
+  elapsedMs,
+  busy,
+  onCancel,
+}: {
+  diagnostics: OcrDiagnostics;
+  elapsedMs: number;
+  busy: boolean;
+  onCancel: () => void;
+}) {
+  if (diagnostics.stage === "idle" && !busy) return null;
+
+  return (
+    <div className="ocr-panel__diagnostics">
+      <div>
+        <strong>Stage:</strong> {STAGE_LABEL_TH[diagnostics.stage]}
+        {diagnostics.regionTotal !== null && diagnostics.regionIndex !== null && (
+          <> — บริเวณที่ {diagnostics.regionIndex} / {diagnostics.regionTotal}</>
+        )}
+      </div>
+      <div>
+        <strong>Progress:</strong>{" "}
+        {diagnostics.progress === null
+          ? "ไม่มีข้อมูล % จาก engine ในขั้นนี้ (ไม่ใช่ 0% ค้าง — ดู Elapsed Time แทน)"
+          : `${Math.round(diagnostics.progress * 100)}%`}
+      </div>
+      <div>
+        <strong>Elapsed Time:</strong> {formatElapsed(elapsedMs)}
+      </div>
+      {diagnostics.stage === "failed" && (
+        <div className="panel__error">
+          <strong>Error Code:</strong> {diagnostics.errorCode ?? "unknown"}
+          <br />
+          <strong>Error Message:</strong> {diagnostics.errorMessage ?? "(ไม่มีรายละเอียด)"}
+        </div>
+      )}
+      {busy && (
+        <button type="button" onClick={onCancel}>
+          ยกเลิก OCR
+        </button>
+      )}
+    </div>
+  );
+}
 
 function OcrCropThumbnail({ image, region }: { image: LoadedImage; region: TextRegionCandidate["region"] }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -68,10 +134,13 @@ export function OcrInspectorPanel({
   hasRecognitionResult,
   candidates,
   busy,
-  progress,
+  diagnostics,
+  elapsedMs,
+  guardMessage,
   error,
   onRunAutoDetection,
   onRequestManualRegion,
+  onCancel,
   onUpdateCandidate,
   onTransferToDraftDimension,
   onExportReport,
@@ -126,11 +195,8 @@ export function OcrInspectorPanel({
         </button>
       </div>
 
-      {busy && progress && (
-        <p className="panel__hint">
-          สถานะ OCR engine: {progress.status} ({Math.round(progress.progress * 100)}%)
-        </p>
-      )}
+      <DiagnosticsPanel diagnostics={diagnostics} elapsedMs={elapsedMs} busy={busy} onCancel={onCancel} />
+      {guardMessage && <p className="panel__warning">{guardMessage}</p>}
       {error && <p className="panel__error">{error}</p>}
 
       <ul className="entity-list ocr-panel__candidate-list">
@@ -152,6 +218,9 @@ export function OcrInspectorPanel({
             >
               {image && <OcrCropThumbnail image={image} region={c.region.region} />}
               <div className="ocr-panel__candidate-body">
+                {!c.rawText && (
+                  <div className="panel__warning">OCR ไม่พบข้อความในบริเวณนี้{c.note ? ` — ${c.note}` : ""}</div>
+                )}
                 <div>
                   <strong>"{c.rawText || "(ไม่มีข้อความ)"}"</strong>
                   {" · มุม "}
