@@ -71,4 +71,28 @@ describe("App — mounts without throwing", () => {
     expect(container.textContent).toContain("Recognition Inspector");
     expect(container.textContent).toContain("นำเข้าภาพก่อนจึงจะใช้งาน Recognition Inspector ได้");
   });
+
+  it("renders the Dimension OCR panel under the Recognition tab without throwing (Session 2B)", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <ProjectProvider>
+          <App />
+        </ProjectProvider>,
+      );
+    });
+
+    const recognitionTabButton = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Recognition",
+    );
+    act(() => {
+      recognitionTabButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain("Dimension OCR (Session 2B)");
+    expect(container.textContent).toContain("นำเข้าภาพก่อนจึงจะใช้งาน OCR ได้");
+  });
 });

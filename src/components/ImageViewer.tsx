@@ -62,6 +62,19 @@ export interface LineOverlaySegment {
   colorHex: string;
 }
 
+/** A highlighted rectangular region (Session 2B OCR text-region / OCR
+ * candidate overlay), in original-image pixel coordinates. Purely
+ * additive/optional, same posture as MaskLayer/LineOverlaySegment —
+ * omitting this prop renders exactly as every earlier session. */
+export interface RegionOverlayItem {
+  id: string;
+  region: Region;
+  colorHex: string;
+  label?: string;
+  selected?: boolean;
+  onSelect?: () => void;
+}
+
 function MaskCanvasLayer({
   mask,
   width,
@@ -119,6 +132,7 @@ interface ImageViewerProps {
   onSelectMarker?: (id: string) => void;
   maskLayers?: MaskLayer[];
   lineOverlay?: LineOverlaySegment[];
+  regionOverlay?: RegionOverlayItem[];
 }
 
 export function ImageViewer({
@@ -131,6 +145,7 @@ export function ImageViewer({
   onSelectMarker,
   maskLayers = [],
   lineOverlay = [],
+  regionOverlay = [],
 }: ImageViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [transform, setTransform] = useState<ViewerTransform>({
@@ -480,6 +495,32 @@ export function ImageViewer({
                       : "image-viewer__region"
                   }
                 />
+              ))}
+              {regionOverlay.map((item) => (
+                <g key={item.id}>
+                  <rect
+                    x={item.region.x}
+                    y={item.region.y}
+                    width={item.region.width}
+                    height={item.region.height}
+                    fill="none"
+                    stroke={item.colorHex}
+                    strokeWidth={item.selected ? 3 : 1.5}
+                    className="image-viewer__ocr-region"
+                    onClick={item.onSelect}
+                    style={{ cursor: item.onSelect ? "pointer" : undefined, pointerEvents: item.onSelect ? "all" : "none" }}
+                  />
+                  {item.label && (
+                    <text
+                      x={item.region.x}
+                      y={item.region.y - 4}
+                      fill={item.colorHex}
+                      className="image-viewer__ocr-region-label"
+                    >
+                      {item.label}
+                    </text>
+                  )}
+                </g>
               ))}
               {dragPreview && (
                 <rect

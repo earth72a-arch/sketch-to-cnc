@@ -7,6 +7,7 @@ import {
   type LoadedImage,
   type MaskLayer,
   type PlacementRequest,
+  type RegionOverlayItem,
   type ViewerMarker,
 } from "./components/ImageViewer";
 import { ImportPanel, type ImportResult } from "./components/ImportPanel";
@@ -19,9 +20,12 @@ import { ValidationPanel } from "./components/ValidationPanel";
 import { ProjectToolbar } from "./components/ProjectToolbar";
 import { ExportBlockingPanel } from "./components/ExportBlockingPanel";
 import { RecognitionInspectorPanel } from "./components/RecognitionInspectorPanel";
+import { OcrInspectorPanel } from "./components/OcrInspectorPanel";
 import { markerRegionCenter } from "./utils/markers";
 import { buildApprovedFurnitureSpec, triggerJsonDownload } from "./utils/serialization";
 import { slugifyFileName } from "./utils/filename";
+import { generateId } from "./utils/id";
+import { toMillimeters } from "./utils/units";
 import type { ValidationIssue } from "./utils/validation";
 import type { Point, ProjectFile, Region } from "./types/project";
 import { createDefaultPalette } from "./recognition/palette";
@@ -29,6 +33,16 @@ import { DEFAULT_RECOGNITION_OPTIONS, runRecognitionPipeline } from "./recogniti
 import { loadPixelBufferFromUrl } from "./recognition/imageDataAdapter";
 import { buildRecognitionReport, serializeRecognitionReport } from "./recognition/report";
 import type { ColorCategory, Palette, PixelBuffer, RecognitionResult } from "./recognition/types";
+import { detectDimensionTextRegions, createManualTextRegion } from "./ocr/textRegionDetection";
+import { DEFAULT_RECOGNIZE_OPTIONS, recognizeTextRegions } from "./ocr/ocrPipeline";
+import { terminateOcrEngine } from "./ocr/tesseractEngine";
+import { pixelBufferToOffscreenCanvas } from "./ocr/canvasImageAdapter";
+import { buildOcrDebugReport, serializeOcrDebugReport } from "./ocr/report";
+import type { OcrCandidate } from "./ocr/types";
+
+const TESSERACT_WORKER_PATH = `${import.meta.env.BASE_URL}tesseract/worker.min.js`;
+const TESSERACT_CORE_PATH = `${import.meta.env.BASE_URL}tesseract/core/tesseract-core-lstm.js`;
+const TESSERACT_LANG_PATH = `${import.meta.env.BASE_URL}tesseract/lang-data`;
 
 type Tab =
   | "views"
@@ -74,6 +88,13 @@ export function App() {
   const [showUnclassifiedMask, setShowUnclassifiedMask] = useState(false);
   const [showLineOverlay, setShowLineOverlay] = useState(true);
   const [showOriginalOnly, setShowOriginalOnly] = useState(false);
+
+  const [ocrCandidates, setOcrCandidates] = useState<OcrCandidate[]>([]);
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [ocrProgress, setOcrProgress] = useState<{ status: string; progress: number } | null>(null);
+  const [ocrSelectedCandidateId, setOcrSelectedCandidateId] = useState<string | null>(null);
+  const [ocrProcessingTimeMs, setOcrProcessingTimeMs] = useState(0);
 
   const dimensionMarkers = useMemo<ViewerMarker[]>(
     () =>
@@ -155,6 +176,137 @@ export function App() {
     );
   }
 
+  async function ensurePixelBuffer(): Promise<PixelBuffer | null> {
+    if (!loadedImage) return null;
+    if (pixelBuffer) return pixelBuffer;
+    const buffer = await loadPixelBufferFromUrl(loadedImage.url);
+    setPixelBuffer(buffer);
+    return buffer;
+  }
+
+  async function handleRunOcrAutoDetection() {
+    if (!loadedImage || !recognitionResult) return;
+    setOcrBusy(true);
+    setOcrError(null);
+    setOcrProgress(null);
+    const started = Date.now();
+    try {
+      const buffer = await ensurePixelBuffer();
+      if (!buffer) return;
+      const regions = detectDimensionTextRegions(
+        recognitionResult.classification.masks.dimension,
+        buffer.width,
+        buffer.height,
+      );
+      const newCandidates = await recognizeTextRegions(buffer, regions, {
+        ...DEFAULT_RECOGNIZE_OPTIONS,
+        isoAxisCentroidsDeg: recognitionResult.axisClustering.axisCentroidsDeg,
+        sourceImageSha256: project.sourceImage?.sha256 ?? "",
+        toImageLike: pixelBufferToOffscreenCanvas,
+        engineOptions: {
+          workerPath: TESSERACT_WORKER_PATH,
+          corePath: TESSERACT_CORE_PATH,
+          langPath: TESSERACT_LANG_PATH,
+          onProgress: (status, progressValue) => setOcrProgress({ status, progress: progressValue }),
+        },
+      });
+      setOcrCandidates((prev) => [...prev, ...newCandidates]);
+    } catch (e) {
+      setOcrError(e instanceof Error ? e.message : "เกิดข้อผิดพลาดในการอ่าน OCR");
+    } finally {
+      setOcrProcessingTimeMs((prev) => prev + (Date.now() - started));
+      setOcrBusy(false);
+      setOcrProgress(null);
+    }
+  }
+
+  function handleRequestManualOcrRegion() {
+    requestRegionPlacement(async (region) => {
+      setOcrBusy(true);
+      setOcrError(null);
+      const started = Date.now();
+      try {
+        const buffer = await ensurePixelBuffer();
+        if (!buffer) return;
+        const manualRegion = createManualTextRegion(region);
+        const newCandidates = await recognizeTextRegions(buffer, [manualRegion], {
+          ...DEFAULT_RECOGNIZE_OPTIONS,
+          isoAxisCentroidsDeg: recognitionResult?.axisClustering.axisCentroidsDeg ?? null,
+          sourceImageSha256: project.sourceImage?.sha256 ?? "",
+          toImageLike: pixelBufferToOffscreenCanvas,
+          engineOptions: {
+            workerPath: TESSERACT_WORKER_PATH,
+            corePath: TESSERACT_CORE_PATH,
+            langPath: TESSERACT_LANG_PATH,
+          },
+        });
+        setOcrCandidates((prev) => [...prev, ...newCandidates]);
+      } catch (e) {
+        setOcrError(e instanceof Error ? e.message : "เกิดข้อผิดพลาดในการอ่าน OCR");
+      } finally {
+        setOcrProcessingTimeMs((prev) => prev + (Date.now() - started));
+        setOcrBusy(false);
+      }
+    });
+  }
+
+  function handleUpdateOcrCandidate(
+    id: string,
+    patch: Partial<Pick<OcrCandidate, "userValue" | "userUnit" | "status" | "note">>,
+  ) {
+    setOcrCandidates((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  }
+
+  function handleTransferOcrCandidateToDraftDimension(candidate: OcrCandidate) {
+    const value = candidate.userValue ?? candidate.parsedValue;
+    const unit = candidate.userUnit ?? candidate.parsedUnit;
+    if (value === null || value === undefined || !unit) return;
+
+    dispatch({
+      type: "ADD_DIMENSION",
+      dimension: {
+        id: generateId("dimension"),
+        value,
+        unit,
+        normalizedValueMm: toMillimeters(value, unit),
+        componentId: null,
+        property: "custom",
+        customPropertyLabel: "ค่าจาก OCR (ยังไม่จัดประเภท)",
+        annotation: null,
+        reviewStatus: "read",
+        provenance: {
+          source: "user_read",
+          note: `ได้จาก OCR อัตโนมัติ (Session 2B) — ข้อความที่อ่านได้: "${candidate.rawText}", ความมั่นใจ: ${
+            candidate.confidence === null ? "ไม่ทราบ" : `${candidate.confidence.toFixed(0)}%`
+          }, มุม: ${candidate.orientationDeg}°, ตำแหน่งพิกเซล: x=${candidate.region.region.x}, y=${candidate.region.region.y}, w=${candidate.region.region.width}, h=${candidate.region.region.height}. ต้องตรวจกับภาพต้นฉบับก่อนยืนยัน.`,
+          timestamp: new Date().toISOString(),
+        },
+      },
+    });
+  }
+
+  function handleExportOcrReport() {
+    if (ocrCandidates.length === 0) return;
+    const report = buildOcrDebugReport(
+      ocrCandidates,
+      {
+        fileName: project.sourceImage?.fileName ?? "unknown.png",
+        width: recognitionResult?.width ?? loadedImage?.width ?? 0,
+        height: recognitionResult?.height ?? loadedImage?.height ?? 0,
+        sha256: project.sourceImage?.sha256 ?? "",
+      },
+      ocrProcessingTimeMs,
+    );
+    triggerJsonDownload(
+      `${slugifyFileName(project.projectName)}.ocr-debug-report.json`,
+      serializeOcrDebugReport(report),
+    );
+  }
+
+  async function handleReleaseOcrEngine() {
+    await terminateOcrEngine();
+  }
+
   function toggleMaskCategory(category: ColorCategory) {
     setVisibleMaskCategories((prev) => {
       const next = new Set(prev);
@@ -196,6 +348,25 @@ export function App() {
       };
     });
   }, [tab, showOriginalOnly, showLineOverlay, recognitionResult]);
+
+  const ocrRegionOverlay = useMemo<RegionOverlayItem[]>(() => {
+    if (tab !== "recognition") return [];
+    return ocrCandidates.map((c) => ({
+      id: c.id,
+      region: c.region.region,
+      colorHex:
+        c.status === "rejected"
+          ? "#9e9e9e"
+          : c.status === "confirmed"
+            ? "#4caf50"
+            : c.status === "ambiguous"
+              ? "#ff9800"
+              : "#2196f3",
+      label: c.rawText || undefined,
+      selected: c.id === ocrSelectedCandidateId,
+      onSelect: () => setOcrSelectedCandidateId(c.id),
+    }));
+  }, [tab, ocrCandidates, ocrSelectedCandidateId]);
 
   function requestRegionPlacement(onCapture: (region: Region) => void) {
     setPlacement({
@@ -302,6 +473,7 @@ export function App() {
             onSelectMarker={focusDimension}
             maskLayers={recognitionMaskLayers}
             lineOverlay={recognitionLineOverlay}
+            regionOverlay={ocrRegionOverlay}
           />
         </section>
 
@@ -400,6 +572,25 @@ export function App() {
                 error={recognitionError}
                 onRunDetection={handleRunRecognition}
                 onExportReport={handleExportRecognitionReport}
+              />
+            )}
+
+            {tab === "recognition" && (
+              <OcrInspectorPanel
+                image={loadedImage}
+                hasRecognitionResult={!!recognitionResult}
+                candidates={ocrCandidates}
+                busy={ocrBusy}
+                progress={ocrProgress}
+                error={ocrError}
+                onRunAutoDetection={handleRunOcrAutoDetection}
+                onRequestManualRegion={handleRequestManualOcrRegion}
+                onUpdateCandidate={handleUpdateOcrCandidate}
+                onTransferToDraftDimension={handleTransferOcrCandidateToDraftDimension}
+                onExportReport={handleExportOcrReport}
+                onReleaseEngine={handleReleaseOcrEngine}
+                selectedCandidateId={ocrSelectedCandidateId}
+                onSelectCandidate={setOcrSelectedCandidateId}
               />
             )}
           </div>
