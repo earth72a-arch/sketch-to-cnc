@@ -4,6 +4,7 @@ import { buildOrientationCandidates } from "./orientationCandidates";
 import { parseDimensionText } from "./parseDimensionText";
 import { recognizeImage, type TesseractEngineOptions } from "./tesseractEngine";
 import { MIN_CONFIDENCE_FOR_READ, type OcrAlternative, type OcrCandidate, type OcrStage, type TextRegionCandidate } from "./types";
+import { inkAspectRatio, orientationPlausibilityScore } from "./orientationPlausibility";
 import type { CancelToken } from "./withTimeout";
 import { generateId } from "../utils/id";
 import type Tesseract from "tesseract.js";
@@ -12,7 +13,20 @@ export interface RecognizeTextRegionsOptions {
   /** ISO axis estimates from Session 2A.1's `clusterAxes`, if available
    * for this drawing — used as extra orientation candidates. */
   isoAxisCentroidsDeg: readonly number[] | null;
+  /** Minimum crop padding, in source-image pixels — always applied even
+   * for a tiny region. */
   cropPaddingPx: number;
+  /** Session 2B.4: padding also scales with the region's own size, as a
+   * fraction of its smaller dimension — see `effectiveCropPadding`. A
+   * FIXED pixel padding (the only kind before 2B.4) shrinks relative to
+   * the glyph as source resolution grows: the same ~50-58px digit
+   * region in this project's 1522px-wide test image would be roughly
+   * 115-135px at the iPad test's 3508px resolution, so a fixed 4px
+   * padding provides proportionally ~2x less surrounding context there
+   * — a plausible contributor to "ตัดส่วนของตัวเลข" (Session 2B.4 §5),
+   * though unverified without that original image (see the report).
+   */
+  cropPaddingFraction: number;
   sourceImageSha256: string;
   /** Converts a (pure, in-memory) oriented crop into whatever form the
    * REAL tesseract.js engine accepts in the current environment — an
@@ -37,16 +51,95 @@ export interface RecognizeTextRegionsOptions {
 
 export const DEFAULT_RECOGNIZE_OPTIONS: Pick<
   RecognizeTextRegionsOptions,
-  "cropPaddingPx" | "ambiguousConfidenceMarginPts"
+  "cropPaddingPx" | "cropPaddingFraction" | "ambiguousConfidenceMarginPts"
 > = {
   cropPaddingPx: 4,
+  // Session 2B.4 §5/§6 evidence (padding sweep on test-001.jpg's real
+  // regions, logged in test-results/baseline-2b4/): confidence for "35"
+  // (a region close to several other extension-line strokes) swung
+  // non-monotonically from 93% down to 15% as padding grew from 4px to
+  // 13px — more context pulled in nearby dimension-line ink and
+  // actively confused the engine on at least this region. "60"/"30"
+  // were unaffected up to ~7-8px then also dipped. An initial 0.15
+  // fraction was tested and REJECTED for exactly this reason. 0.05 is
+  // a no-op for every region size seen in this project's real test
+  // image so far (keeps today's proven-good behavior unchanged) while
+  // still scaling padding up for meaningfully larger regions — e.g. a
+  // ~300px-tall region (roughly the scale difference to the iPad
+  // test's 3508px image) gets ~15px instead of a flat 4px. This is a
+  // conservative, evidence-bounded default, not a universal "more
+  // padding is better" assumption.
+  cropPaddingFraction: 0.05,
   ambiguousConfidenceMarginPts: 15,
 };
+
+/** Session 2B.4 — resolution-aware crop padding: the larger of the
+ * fixed minimum and a fraction of the region's own (smaller) dimension,
+ * so padding grows with the glyph instead of staying a constant pixel
+ * count regardless of source resolution. Pure and independently tested. */
+export function effectiveCropPadding(regionWidthPx: number, regionHeightPx: number, paddingPx: number, paddingFraction: number): number {
+  const minDimension = Math.min(regionWidthPx, regionHeightPx);
+  return Math.max(paddingPx, Math.round(minDimension * paddingFraction));
+}
 
 interface Attempt {
   angle: number;
   text: string;
   confidence: number | null;
+  /** Session 2B.4: width/height of the de-skewed ink at this attempt's
+   * orientation, or null if unavailable — see orientationPlausibility.ts. */
+  aspectRatio: number | null;
+  /** Session 2B.4: confidence adjusted by orientation plausibility —
+   * used ONLY to pick/rank attempts, never shown to the user in place
+   * of the real engine confidence (that stays truthful in the output). */
+  score: number;
+}
+
+/**
+ * Session 2B.4 — picks the "best" attempt using agreement across
+ * orientations first, plausibility-adjusted score second. Evidence
+ * (Session 2B.4 §1/§7): a lone outlier orientation can score highest on
+ * raw confidence while still being wrong (iPad's "30"→"20" at 93%).
+ * Grouping by parsed numeric value and preferring a value multiple
+ * DIFFERENT angles independently agree on (over a lone high-scoring
+ * outlier) directly implements "เปรียบเทียบ Alternatives หลายมุม" +
+ * "ตรวจความสอดคล้องของผล OCR" from the Session 2B.4 brief — confidence
+ * is never the only signal trusted.
+ */
+function pickBestAttempt(attempts: Attempt[]): Attempt {
+  const parseableGroups = new Map<string, Attempt[]>();
+  for (const a of attempts) {
+    const parsed = parseDimensionText(a.text);
+    if (parsed.ambiguous || parsed.value === null) continue;
+    const key = `${parsed.value}|${parsed.unit ?? ""}`;
+    const group = parseableGroups.get(key) ?? [];
+    group.push(a);
+    parseableGroups.set(key, group);
+  }
+
+  if (parseableGroups.size > 0) {
+    let bestGroup: Attempt[] | null = null;
+    let bestGroupScore = -Infinity;
+    for (const group of parseableGroups.values()) {
+      const groupBestScore = Math.max(...group.map((a) => a.score));
+      // Agreement count is the PRIMARY sort key (more independent angles
+      // landing on the same value outweighs one angle's raw score lead),
+      // best plausibility-adjusted score within the group breaks ties.
+      const rank = group.length * 1000 + groupBestScore;
+      if (rank > bestGroupScore) {
+        bestGroupScore = rank;
+        bestGroup = group;
+      }
+    }
+    if (bestGroup) {
+      return bestGroup.reduce((best, a) => (a.score > best.score ? a : best));
+    }
+  }
+
+  // Nothing parsed as a clean number (e.g. only noise/punctuation was
+  // read) — fall back to the highest plausibility-adjusted score among
+  // ALL attempts, so the raw text is still surfaced for user review.
+  return attempts.reduce((best, a) => (a.score > best.score ? a : best));
 }
 
 async function recognizeOneRegion(
@@ -60,11 +153,12 @@ async function recognizeOneRegion(
   const attempts: Attempt[] = [];
   const engineErrors: string[] = [];
   let fatalErrorCode: string | null = null;
+  const paddingPx = effectiveCropPadding(region.region.width, region.region.height, options.cropPaddingPx, options.cropPaddingFraction);
 
   for (const angle of angles) {
     if (options.cancelToken?.isCancelled()) break;
 
-    const oriented = extractOrientedCrop(buffer, region.region, options.cropPaddingPx, angle);
+    const oriented = extractOrientedCrop(buffer, region.region, paddingPx, angle);
     const image = options.toImageLike(oriented);
     const outcome = await recognizeImage(image, {
       ...options.engineOptions,
@@ -81,11 +175,17 @@ async function recognizeOneRegion(
     }
     const text = outcome.text.trim();
     if (text.length === 0) continue;
-    attempts.push({ angle, text, confidence: outcome.confidence });
+    const aspectRatio = inkAspectRatio(oriented);
+    attempts.push({
+      angle,
+      text,
+      confidence: outcome.confidence,
+      aspectRatio,
+      score: orientationPlausibilityScore(outcome.confidence, aspectRatio),
+    });
   }
 
-  attempts.sort((a, b) => (b.confidence ?? -1) - (a.confidence ?? -1));
-  const best = attempts[0];
+  const best = attempts.length > 0 ? pickBestAttempt(attempts) : undefined;
 
   if (!best) {
     const cancelled = fatalErrorCode === "cancelled";
@@ -109,10 +209,8 @@ async function recognizeOneRegion(
   }
 
   const parsed = parseDimensionText(best.text);
-  const runnerUps = attempts.slice(1).filter((a) => a.text !== best.text);
-  const hasCloseRunnerUp = runnerUps.some(
-    (a) => (best.confidence ?? 0) - (a.confidence ?? 0) <= options.ambiguousConfidenceMarginPts,
-  );
+  const runnerUps = attempts.filter((a) => a !== best && a.text !== best.text);
+  const hasCloseRunnerUp = runnerUps.some((a) => best.score - a.score <= options.ambiguousConfidenceMarginPts);
   const alternatives: OcrAlternative[] = runnerUps.map((a) => ({ text: a.text, confidence: a.confidence }));
 
   const lowConfidence = best.confidence !== null && best.confidence < MIN_CONFIDENCE_FOR_READ;
