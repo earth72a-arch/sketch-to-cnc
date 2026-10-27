@@ -144,6 +144,54 @@
   cursor: pointer;
 }
 
+/* Session 3A — Tap-to-Dimension marker status: a draft marker must
+ * never be visually mistaken for a confirmed one. Draft = hollow/amber
+ * (still pending), Confirmed = solid green (safe to treat as reviewed). */
+.image-viewer__marker-dot--draft {
+  fill: #ff9800;
+  fill-opacity: 0.35;
+  stroke: #ff9800;
+  stroke-width: 2.5;
+}
+
+.image-viewer__marker-dot--confirmed {
+  fill: #2e7d32;
+  stroke: white;
+  stroke-width: 2;
+}
+
+.tap-to-dimension-panel__mode-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #44525f;
+  background: #2a3a48;
+  color: white;
+  font-size: 1rem;
+}
+
+.tap-to-dimension-panel__mode-btn--active {
+  background: #ff9800;
+  border-color: #ffb74d;
+  color: #1b1200;
+  font-weight: 700;
+}
+
+.tap-to-dimension-panel__popup {
+  border: 2px solid #ff9800;
+  border-radius: 10px;
+  padding: 0.75rem;
+  margin: 0.75rem 0;
+  background: #2a3a48;
+}
+
+.tap-to-dimension-panel__popup input,
+.tap-to-dimension-panel__popup select {
+  font-size: 1.1rem;
+  min-height: 44px;
+}
+
 .image-viewer__marker-label {
   font-size: 13px;
   fill: white;

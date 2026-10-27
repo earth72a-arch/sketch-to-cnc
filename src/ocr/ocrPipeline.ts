@@ -3,13 +3,20 @@ import { extractOrientedCrop } from "./pixelTransform";
 import { buildOrientationCandidates } from "./orientationCandidates";
 import { parseDimensionText } from "./parseDimensionText";
 import { recognizeImage, type TesseractEngineOptions } from "./tesseractEngine";
-import { MIN_CONFIDENCE_FOR_READ, type OcrAlternative, type OcrCandidate, type OcrStage, type TextRegionCandidate } from "./types";
+import { MIN_CONFIDENCE_FOR_READ, type OcrAlternative, type OcrCandidate, type OcrEngine, type OcrStage, type TextRegionCandidate } from "./types";
 import { inkAspectRatio, orientationPlausibilityScore } from "./orientationPlausibility";
 import type { CancelToken } from "./withTimeout";
 import { generateId } from "../utils/id";
 import type Tesseract from "tesseract.js";
 
 export interface RecognizeTextRegionsOptions {
+  /** Session 2B.6 — which engine this run uses, recorded onto every
+   * resulting candidate so comparison results stay labeled. Defaults to
+   * `"tesseract"` (the only engine this project actually runs — see the
+   * Session 2B.6 final report's PaddleOCR.js BLOCKED verdict). Never
+   * switched automatically; the caller must pass this explicitly when
+   * offering an engine choice in the UI. */
+  engine?: OcrEngine;
   /** ISO axis estimates from Session 2A.1's `clusterAxes`, if available
    * for this drawing — used as extra orientation candidates. */
   isoAxisCentroidsDeg: readonly number[] | null;
@@ -200,6 +207,8 @@ async function recognizeOneRegion(
       alternatives: [],
       status: "ambiguous",
       sourceImageSha256: options.sourceImageSha256,
+      engine: options.engine ?? "tesseract",
+      testMode: region.method === "auto-region" ? "auto-detection" : "manual-crop",
       note: cancelled
         ? "ยกเลิกก่อนอ่านบริเวณนี้สำเร็จ"
         : engineErrors.length > 0
@@ -228,6 +237,8 @@ async function recognizeOneRegion(
     alternatives,
     status,
     sourceImageSha256: options.sourceImageSha256,
+    engine: options.engine ?? "tesseract",
+    testMode: region.method === "auto-region" ? "auto-detection" : "manual-crop",
   };
 }
 

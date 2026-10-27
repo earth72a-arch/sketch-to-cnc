@@ -10,6 +10,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { recognizeTextRegions, DEFAULT_RECOGNIZE_OPTIONS } from "./ocrPipeline";
 import { terminateOcrEngine, createCancelToken } from "./tesseractEngine";
 import { detectDimensionTextRegions, createManualTextRegion } from "./textRegionDetection";
+import { DEFAULT_CHAR_GROUPING_OPTIONS } from "./characterGrouping";
 import { encodeBmp } from "./testSupport/bmpEncoder.node";
 import { renderSyntheticText, pastePixelBuffer } from "./fixtures/syntheticText";
 import { createBlankBuffer, drawSyntheticLine } from "../recognition/fixtures/syntheticImages";
@@ -51,12 +52,14 @@ describe("Session 2B end-to-end — real color mask + real OCR engine", () => {
       // fixtures/syntheticText.ts) can erode the thin single-pixel-wide
       // strokes that connect a glyph's own sub-shapes (e.g. "0"'s left
       // and right walls) below the color-classification tolerance,
-      // fragmenting one glyph into several raw ink components. A wider
-      // grouping gap re-merges those fragments; this is a known fixture
-      // limitation, not a product tuning value — see the Session 2B
-      // final report.
+      // fragmenting one glyph into several raw ink components spaced
+      // further apart (relative to their own size) than any real
+      // Procreate scribble stroke gap this project has evidence for —
+      // a known fixture limitation (same root cause and same override
+      // rationale as Session 2B's original `charGroupingGapPx: 45`),
+      // not a product tuning value — see the Session 2B.6 final report.
       const regions = detectDimensionTextRegions(classification.masks.dimension, buffer.width, buffer.height, {
-        charGroupingGapPx: 45,
+        charGrouping: { ...DEFAULT_CHAR_GROUPING_OPTIONS, tightGapFactor: 15, maxGlyphSizeFactor: 20 },
       });
 
       expect(regions).toHaveLength(1); // the line must be excluded, only "120" remains
@@ -84,6 +87,67 @@ describe("Session 2B end-to-end — real color mask + real OCR engine", () => {
       expect(candidates).toHaveLength(1);
       expect(candidates[0].status).not.toBe("confirmed");
       expect(["read", "ambiguous"]).toContain(candidates[0].status);
+    },
+    30000,
+  );
+
+  it(
+    "SYNTHETIC ONLY (not a real Procreate scribble) — '35' through the real color mask + real character grouping + real OCR engine is detected as ONE region, not split into '3' and '5'",
+    async () => {
+      // Session 2B.6 regression for the reported bug ("35" split into
+      // two single-digit regions). This bitmap-font fixture is NOT the
+      // hand-drawn Procreate scribble style the bug was originally
+      // reported against — see the Session 2B.6 final report's "Known
+      // Limitations": this proves the region-grouping FIX works against
+      // this real pipeline + real engine on *a* two-digit number, not
+      // that the original real-scribble bug is confirmed fixed.
+      const buffer = createBlankBuffer(1200, 400);
+      const text = renderSyntheticText("35");
+      pastePixelBuffer(buffer, text, 90, 60);
+
+      const palette = createDefaultPalette();
+      const classification = classifyPixels(buffer, palette);
+      const regions = detectDimensionTextRegions(classification.masks.dimension, buffer.width, buffer.height);
+
+      expect(regions).toHaveLength(1);
+
+      const candidates = await recognizeTextRegions(buffer, regions, {
+        ...DEFAULT_RECOGNIZE_OPTIONS,
+        isoAxisCentroidsDeg: null,
+        sourceImageSha256: "z".repeat(64),
+        toImageLike,
+        engineOptions,
+      });
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0].status).not.toBe("confirmed");
+    },
+    30000,
+  );
+
+  it(
+    "SYNTHETIC ONLY (not a real Procreate scribble) — a single '8' glyph is detected as ONE region (not split into two components read as '00')",
+    async () => {
+      // Session 2B.6: the reported bug is that a hand-scribbled "8" with
+      // a visible waist pinch can get its upper/lower loops detected as
+      // two SEPARATE text regions, which can then each independently
+      // read as "0" (displaying as "00" across two candidates). This
+      // test verifies the REGION-GROUPING behavior (one region, not
+      // two) using this project's bitmap-font fixture's "8" glyph,
+      // which is solid/connected by construction and does NOT itself
+      // reproduce a waist-pinch gap — the gap scenario is covered
+      // directly (without engine noise) in
+      // textRegionDetection.test.ts's "merges a vertically-split glyph"
+      // test. This test adds real-engine confirmation that a normal,
+      // connected "8" still reads as one region end-to-end.
+      const buffer = createBlankBuffer(600, 400);
+      const text = renderSyntheticText("8");
+      pastePixelBuffer(buffer, text, 90, 60);
+
+      const palette = createDefaultPalette();
+      const classification = classifyPixels(buffer, palette);
+      const regions = detectDimensionTextRegions(classification.masks.dimension, buffer.width, buffer.height);
+
+      expect(regions).toHaveLength(1);
     },
     30000,
   );

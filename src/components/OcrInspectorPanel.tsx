@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { OcrCandidate, OcrCandidateStatus, OcrDiagnostics, OcrStage, OcrUnit, TextRegionCandidate } from "../ocr/types";
+import type { OcrCandidate, OcrCandidateStatus, OcrDiagnostics, OcrEngine, OcrStage, OcrUnit, TextRegionCandidate } from "../ocr/types";
 import type { LoadedImage } from "./ImageViewer";
 
 interface OcrInspectorPanelProps {
@@ -11,6 +11,10 @@ interface OcrInspectorPanelProps {
   elapsedMs: number;
   guardMessage: string | null;
   error: string | null;
+  engine: OcrEngine;
+  onChangeEngine: (engine: OcrEngine) => void;
+  testMode: "auto-detection" | "manual-crop" | "compare-both";
+  onChangeTestMode: (mode: "auto-detection" | "manual-crop" | "compare-both") => void;
   onRunAutoDetection: () => void;
   onRequestManualRegion: () => void;
   onCancel: () => void;
@@ -138,6 +142,10 @@ export function OcrInspectorPanel({
   elapsedMs,
   guardMessage,
   error,
+  engine,
+  onChangeEngine,
+  testMode,
+  onChangeTestMode,
   onRunAutoDetection,
   onRequestManualRegion,
   onCancel,
@@ -179,6 +187,34 @@ export function OcrInspectorPanel({
       {image && !hasRecognitionResult && (
         <p className="panel__warning">กรุณากด "ตรวจจับ (Run Detection)" ในแท็บ Recognition ก่อน เพื่อให้มี Dimension Color Mask</p>
       )}
+
+      <div className="form-grid">
+        <label>
+          OCR Engine
+          <select value={engine} onChange={(e) => onChangeEngine(e.target.value as OcrEngine)} disabled={busy}>
+            <option value="tesseract">Tesseract.js</option>
+            <option value="paddleocr" disabled>
+              PaddleOCR.js (Experimental — BLOCKED, ดูรายงาน Session 2B.6)
+            </option>
+          </select>
+        </label>
+        <label>
+          Test Mode
+          <select
+            value={testMode}
+            onChange={(e) => onChangeTestMode(e.target.value as "auto-detection" | "manual-crop" | "compare-both")}
+            disabled={busy}
+          >
+            <option value="auto-detection">Current Region Detection</option>
+            <option value="manual-crop">Full Text Region / Manual Crop</option>
+            <option value="compare-both">Compare Both Modes</option>
+          </select>
+        </label>
+      </div>
+      <p className="panel__hint">
+        ผลลัพธ์ทุกรายการด้านล่างระบุ Engine และ Test Mode ที่ใช้เสมอ (ไม่มีการสลับ Engine อัตโนมัติ) — PaddleOCR.js
+        ยังไม่พร้อมใช้งานในโปรเจกต์นี้ (BLOCKED)
+      </p>
 
       <div className="form-actions">
         <button type="button" onClick={onRunAutoDetection} disabled={!image || !hasRecognitionResult || busy}>
@@ -228,6 +264,10 @@ export function OcrInspectorPanel({
                   {c.confidence === null ? "ไม่ทราบ" : `${c.confidence.toFixed(0)}%`}
                   {" · "}
                   <span className={`status-badge status-badge--${c.status}`}>{STATUS_LABEL_TH[c.status]}</span>
+                </div>
+                <div className="ocr-panel__provenance">
+                  Engine: {c.engine === "tesseract" ? "Tesseract.js" : "PaddleOCR.js"} · Test Mode:{" "}
+                  {c.testMode === "auto-detection" ? "Current Region Detection" : "Manual Crop"}
                 </div>
 
                 {isEditing ? (

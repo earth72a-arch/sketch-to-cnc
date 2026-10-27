@@ -42,7 +42,7 @@ describe("detectDimensionTextRegions", () => {
       ...filledRect(30, 10, 6, 14), // "0"
     ];
     const mask = maskFromPixels(width, height, pixels);
-    const regions = detectDimensionTextRegions(mask, width, height, { charGroupingGapPx: 8 });
+    const regions = detectDimensionTextRegions(mask, width, height);
     expect(regions).toHaveLength(1);
     expect(regions[0].sourceComponentCount).toBe(3);
     expect(regions[0].method).toBe("auto-region");
@@ -53,8 +53,92 @@ describe("detectDimensionTextRegions", () => {
     const height = 40;
     const pixels = [...filledRect(10, 10, 6, 14), ...filledRect(250, 10, 6, 14)];
     const mask = maskFromPixels(width, height, pixels);
-    const regions = detectDimensionTextRegions(mask, width, height, { charGroupingGapPx: 8 });
+    const regions = detectDimensionTextRegions(mask, width, height);
     expect(regions).toHaveLength(2);
+  });
+
+  it("Session 2B.6 — merges a wide-spaced two-digit number like '35' that the old fixed 14px gap used to split", () => {
+    // Two digit-sized blobs spaced further apart than the OLD fixed
+    // 14px constant (Session 2B) but still a plausible digit gap
+    // relative to their own ~20px size — the real-world bug this
+    // session fixes: Procreate scribble digit spacing scales with pen
+    // size, a fixed pixel gap does not.
+    const width = 400;
+    const height = 150;
+    const pixels = [
+      ...filledRect(20, 15, 20, 28), // "3"-sized blob
+      ...filledRect(58, 15, 20, 28), // "5"-sized blob, 18px gap > old fixed 14px
+    ];
+    const mask = maskFromPixels(width, height, pixels);
+    const regions = detectDimensionTextRegions(mask, width, height);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].sourceComponentCount).toBe(2);
+  });
+
+  it("Session 2B.6 — scales with LARGE digits too (adaptive, not a fixed pixel constant)", () => {
+    // Same relative digit spacing as the test above, scaled up ~5x —
+    // an adaptive gapFactor should still merge these; a fixed-pixel
+    // threshold tuned for small digits would wrongly split large ones.
+    const width = 1000;
+    const height = 500;
+    const pixels = [
+      ...filledRect(80, 60, 100, 140),
+      ...filledRect(270, 60, 100, 140), // 90px gap, large relative to a ~140px glyph but same ratio as above
+    ];
+    const mask = maskFromPixels(width, height, pixels);
+    const regions = detectDimensionTextRegions(mask, width, height);
+    expect(regions).toHaveLength(1);
+  });
+
+  it("Session 2B.6 — merges a vertically-split glyph (e.g. an '8' drawn with a waist gap) instead of reading it as two separate characters", () => {
+    const width = 120;
+    const height = 160;
+    const pixels = [
+      ...filledRect(15, 10, 20, 25), // upper loop
+      ...filledRect(15, 40, 20, 25), // lower loop, small vertical gap (waist pinch)
+    ];
+    const mask = maskFromPixels(width, height, pixels);
+    const regions = detectDimensionTextRegions(mask, width, height);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].sourceComponentCount).toBe(2);
+  });
+
+  it("Session 2B.6 — does not force equal character widths ('1' narrow next to '0' wide)", () => {
+    const width = 200;
+    const height = 100;
+    const pixels = [
+      ...filledRect(10, 10, 6, 20), // narrow "1"
+      ...filledRect(24, 10, 18, 20), // wide "0"
+    ];
+    const mask = maskFromPixels(width, height, pixels);
+    const regions = detectDimensionTextRegions(mask, width, height);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].sourceComponentCount).toBe(2);
+  });
+
+  it("Session 2B.6 — never merges distinct texts just because they are near each other at an implausible angle", () => {
+    // Two blobs close together (within the old/new gap budget) but
+    // positioned on a steep diagonal that matches neither 0°, 90°, nor
+    // any supplied ISO axis — must NOT be merged (CLAUDE.md: never
+    // guess/merge without evidence of being the same text run).
+    const width = 100;
+    const height = 100;
+    const pixels = [...filledRect(10, 10, 14, 14), ...filledRect(30, 60, 14, 14)]; // ~63° diagonal
+    const mask = maskFromPixels(width, height, pixels);
+    const regions = detectDimensionTextRegions(mask, width, height, {}, null);
+    expect(regions).toHaveLength(2);
+  });
+
+  it("Session 2B.6 — merges rotated text along a supplied ISO axis hint (not horizontal-only)", () => {
+    // Two digit-sized blobs arranged along a ~30° diagonal (an ISO
+    // edge), close relative to their size — should merge when the ISO
+    // axis hint supports that direction, even though it is not 0°/90°.
+    const width = 150;
+    const height = 150;
+    const pixels = [...filledRect(20, 90, 20, 20), ...filledRect(37, 73, 20, 20)]; // ~30deg from first blob
+    const mask = maskFromPixels(width, height, pixels);
+    const regions = detectDimensionTextRegions(mask, width, height, {}, [30, 90, 150]);
+    expect(regions).toHaveLength(1);
   });
 
   it("applies configurable padding around the detected bounding box", () => {

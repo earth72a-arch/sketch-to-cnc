@@ -60,7 +60,7 @@ describe("App — mounts without throwing", () => {
     });
 
     const recognitionTabButton = [...container.querySelectorAll("button")].find(
-      (b) => b.textContent === "Recognition",
+      (b) => b.textContent === "Recognition / OCR (Experimental)",
     );
     expect(recognitionTabButton).toBeTruthy();
 
@@ -86,7 +86,7 @@ describe("App — mounts without throwing", () => {
     });
 
     const recognitionTabButton = [...container.querySelectorAll("button")].find(
-      (b) => b.textContent === "Recognition",
+      (b) => b.textContent === "Recognition / OCR (Experimental)",
     );
     act(() => {
       recognitionTabButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -94,5 +94,53 @@ describe("App — mounts without throwing", () => {
 
     expect(container.textContent).toContain("Dimension OCR (Session 2B)");
     expect(container.textContent).toContain("นำเข้าภาพก่อนจึงจะใช้งาน OCR ได้");
+  });
+
+  it("Session 3A: defaults to the Tap-to-Dimension tab on first load, not OCR/Recognition", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <ProjectProvider>
+          <App />
+        </ProjectProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain("Tap-to-Dimension (V1)");
+    // OCR's own panel text must NOT be visible until the user explicitly
+    // navigates to the (now-Experimental) Recognition tab.
+    expect(container.textContent).not.toContain("Dimension OCR (Session 2B)");
+
+    const tapTabButton = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Tap-to-Dimension",
+    );
+    expect(tapTabButton?.className).toContain("app__tab--active");
+  });
+
+  it("Session 3A (M): mounting/using the app never starts OCR implicitly — diagnostics stay idle without the user opening Recognition", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root!.render(
+        <ProjectProvider>
+          <App />
+        </ProjectProvider>,
+      );
+    });
+
+    // Switch across a few other tabs (as a user poking around would) —
+    // none of this may touch the OCR engine.
+    for (const label of ["Views", "Components", "Materials"]) {
+      const btn = [...container.querySelectorAll("button")].find((b) => b.textContent === label);
+      act(() => btn!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    }
+
+    expect(container.textContent).not.toContain("กำลังอ่าน OCR");
+    expect(container.textContent).not.toContain("Dimension OCR (Session 2B)");
   });
 });

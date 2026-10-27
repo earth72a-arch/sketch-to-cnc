@@ -4,71 +4,9 @@ import { fitLine } from "../recognition/lineFit";
 import type { ComponentStats } from "../recognition/types";
 import type { Region } from "../types/project";
 import type { OcrRegionDetectionOptions, TextRegionCandidate } from "./types";
+import { groupCharacters, DEFAULT_CHAR_GROUPING_OPTIONS, type CharCluster } from "./characterGrouping";
 
-function expandedBoxesOverlap(a: ComponentStats, b: ComponentStats, gapPx: number): boolean {
-  const half = gapPx / 2;
-  return !(
-    a.maxX + half < b.minX - half ||
-    b.maxX + half < a.minX - half ||
-    a.maxY + half < b.minY - half ||
-    b.maxY + half < a.minY - half
-  );
-}
-
-interface Cluster {
-  members: ComponentStats[];
-  minX: number;
-  minY: number;
-  maxX: number;
-  maxY: number;
-  count: number;
-}
-
-/** Groups components whose expanded bounding boxes overlap — same
- * union-find approach as `mergeNearbyComponents` (Session 2A.1), but
- * also keeps the member list so callers know how many ink components
- * (e.g. individual digits) fed each text-region candidate. */
-function clusterByProximity(components: ComponentStats[], gapPx: number): Cluster[] {
-  const parent = components.map((_, i) => i);
-  function find(i: number): number {
-    while (parent[i] !== i) {
-      parent[i] = parent[parent[i]];
-      i = parent[i];
-    }
-    return i;
-  }
-  function union(i: number, j: number): void {
-    const ri = find(i);
-    const rj = find(j);
-    if (ri !== rj) parent[ri] = rj;
-  }
-
-  for (let i = 0; i < components.length; i++) {
-    for (let j = i + 1; j < components.length; j++) {
-      if (expandedBoxesOverlap(components[i], components[j], gapPx)) union(i, j);
-    }
-  }
-
-  const clustersByRoot = new Map<number, Cluster>();
-  for (let i = 0; i < components.length; i++) {
-    const root = find(i);
-    const c = components[i];
-    const existing = clustersByRoot.get(root);
-    if (!existing) {
-      clustersByRoot.set(root, { members: [c], minX: c.minX, minY: c.minY, maxX: c.maxX, maxY: c.maxY, count: c.count });
-    } else {
-      existing.members.push(c);
-      existing.minX = Math.min(existing.minX, c.minX);
-      existing.minY = Math.min(existing.minY, c.minY);
-      existing.maxX = Math.max(existing.maxX, c.maxX);
-      existing.maxY = Math.max(existing.maxY, c.maxY);
-      existing.count += c.count;
-    }
-  }
-  return [...clustersByRoot.values()];
-}
-
-function toRegion(cluster: Cluster, width: number, height: number, paddingPx: number): Region {
+function toRegion(cluster: CharCluster, width: number, height: number, paddingPx: number): Region {
   const minX = Math.max(0, Math.floor(cluster.minX) - paddingPx);
   const minY = Math.max(0, Math.floor(cluster.minY) - paddingPx);
   const maxX = Math.min(width - 1, Math.ceil(cluster.maxX) + paddingPx);
@@ -90,9 +28,12 @@ function toRegion(cluster: Cluster, width: number, height: number, paddingPx: nu
  * 2B spec §5): a component is excluded as a probable LINE (leader /
  * extension line) when it is both highly linear and long — reusing the
  * same PCA line-fit (`fitLine`) Session 2A.1 already relies on. What
- * remains is grouped by proximity (character/digit spacing) into text
- * clusters, since "120" is three separate ink components that must be
- * read together, not three isolated digits.
+ * remains is grouped by adaptive character grouping (Session 2B.6, see
+ * `characterGrouping.ts`) into text clusters, since "120" is three
+ * separate ink components that must be read together, not three
+ * isolated digits — and the merge distance scales with each pair's own
+ * measured size instead of one fixed pixel constant, so it works for
+ * both small and large hand-drawn digits in the same drawing.
  *
  * Returns bounding boxes in ORIGINAL IMAGE PIXEL coordinates. Never
  * asserts that a region contains a real number — that is OCR's job, and
@@ -103,9 +44,14 @@ export function detectDimensionTextRegions(
   width: number,
   height: number,
   options: Partial<OcrRegionDetectionOptions> = {},
+  /** Session 2B.6 — ISO axis estimates (Session 2A.1), passed through as
+   * SUPPORTING evidence for character-grouping alignment checks only;
+   * the primary direction signal is always the components' own
+   * arrangement (see `characterGrouping.ts`). */
+  isoAxisCentroidsDeg: readonly number[] | null = null,
 ): TextRegionCandidate[] {
   const opts: OcrRegionDetectionOptions = {
-    charGroupingGapPx: 14,
+    charGrouping: DEFAULT_CHAR_GROUPING_OPTIONS,
     paddingPx: 6,
     lineLinearityThreshold: 0.9,
     lineMinLengthPx: 40,
@@ -126,7 +72,7 @@ export function detectDimensionTextRegions(
     if (!looksLikeLine) textLikeComponents.push(component);
   }
 
-  const clusters = clusterByProximity(textLikeComponents, opts.charGroupingGapPx);
+  const clusters = groupCharacters(textLikeComponents, isoAxisCentroidsDeg, opts.charGrouping);
   const imageArea = width * height;
   const maxClusterArea = imageArea * opts.maxClusterAreaFraction;
 

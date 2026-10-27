@@ -14,6 +14,8 @@ import { ImportPanel, type ImportResult } from "./components/ImportPanel";
 import { ViewManagerPanel } from "./components/ViewManagerPanel";
 import { ComponentEditorPanel } from "./components/ComponentEditorPanel";
 import { DimensionEditorPanel } from "./components/DimensionEditorPanel";
+import { TapToDimensionPanel } from "./components/TapToDimensionPanel";
+import { AXIS_SHORT_LABEL } from "./utils/axisSuggestion";
 import { SpanEditorPanel } from "./components/SpanEditorPanel";
 import { MaterialsPanel } from "./components/MaterialsPanel";
 import { ValidationPanel } from "./components/ValidationPanel";
@@ -45,6 +47,7 @@ import {
   IDLE_OCR_DIAGNOSTICS,
   type OcrCandidate,
   type OcrDiagnostics,
+  type OcrEngine,
   type TextRegionCandidate,
 } from "./ocr/types";
 
@@ -63,6 +66,7 @@ const TESSERACT_CORE_PATH = `${import.meta.env.BASE_URL}tesseract/tesseract-core
 const TESSERACT_LANG_PATH = `${import.meta.env.BASE_URL}tesseract/lang-data`;
 
 type Tab =
+  | "tap-dimension"
   | "views"
   | "components"
   | "dimensions"
@@ -71,14 +75,20 @@ type Tab =
   | "validation"
   | "recognition";
 
+// Session 3A: Tap-to-Dimension is the V1 default/primary workflow, so it
+// leads the tab order and is the initial tab. "Recognition" (OCR) moves
+// to the end and is labeled Experimental — it still exists and still
+// works exactly as before, just no longer the first thing a user sees
+// (CLAUDE.md / Session 3A §6: OCR must never be the default workflow).
 const TABS: { id: Tab; label: string }[] = [
+  { id: "tap-dimension", label: "Tap-to-Dimension" },
   { id: "views", label: "Views" },
   { id: "components", label: "Components" },
   { id: "dimensions", label: "Dimensions" },
   { id: "spans", label: "Spans" },
   { id: "materials", label: "Materials" },
   { id: "validation", label: "Validation" },
-  { id: "recognition", label: "Recognition" },
+  { id: "recognition", label: "Recognition / OCR (Experimental)" },
 ];
 
 const AXIS_COLORS_HEX = ["#00bcd4", "#ff9800", "#8bc34a"];
@@ -87,12 +97,13 @@ const UNCLASSIFIED_MASK_COLOR = { r: 255, g: 0, b: 255 };
 
 export function App() {
   const { project, dispatch } = useProject();
-  const [tab, setTab] = useState<Tab>("views");
+  const [tab, setTab] = useState<Tab>("tap-dimension");
   const [loadedImage, setLoadedImage] = useState<LoadedImage | null>(null);
   const [mismatchWarning, setMismatchWarning] = useState<{ expected: string; actual: string } | null>(null);
   const [activeViewId, setActiveViewId] = useState<string | null>(null);
   const [placement, setPlacement] = useState<PlacementRequest | null>(null);
   const [focusDimensionId, setFocusDimensionId] = useState<string | null>(null);
+  const [tapFocusDimensionId, setTapFocusDimensionId] = useState<string | null>(null);
   const [focusComponentId, setFocusComponentId] = useState<string | null>(null);
   const [exportIssues, setExportIssues] = useState<ValidationIssue[] | null>(null);
   const [exportSuccessMessage, setExportSuccessMessage] = useState<string | null>(null);
@@ -108,6 +119,8 @@ export function App() {
   const [showOriginalOnly, setShowOriginalOnly] = useState(false);
 
   const [ocrCandidates, setOcrCandidates] = useState<OcrCandidate[]>([]);
+  const [ocrEngine, setOcrEngine] = useState<OcrEngine>("tesseract");
+  const [ocrTestMode, setOcrTestMode] = useState<"auto-detection" | "manual-crop" | "compare-both">("auto-detection");
   const [ocrBusy, setOcrBusy] = useState(false);
   const [ocrError, setOcrError] = useState<string | null>(null);
   const [ocrDiagnostics, setOcrDiagnostics] = useState<OcrDiagnostics>(IDLE_OCR_DIAGNOSTICS);
@@ -134,10 +147,13 @@ export function App() {
     () =>
       project.dimensions
         .filter((d) => d.annotation)
-        .map((d, index) => ({
+        .map((d) => ({
           id: d.id,
           point: markerRegionCenter(d.annotation!.region),
-          label: String(index + 1),
+          // Session 3B §7 "ดู Axis" directly on the image — a short axis
+          // code instead of a bare index, without cluttering the marker.
+          label: AXIS_SHORT_LABEL[d.axis],
+          status: d.reviewStatus === "confirmed" ? "confirmed" : "draft",
         })),
     [project.dimensions],
   );
@@ -298,6 +314,7 @@ export function App() {
 
       const newCandidates = await recognizeTextRegions(buffer, regions, {
         ...DEFAULT_RECOGNIZE_OPTIONS,
+        engine: ocrEngine,
         isoAxisCentroidsDeg: recognitionResult?.axisClustering.axisCentroidsDeg ?? null,
         sourceImageSha256: project.sourceImage?.sha256 ?? "",
         toImageLike: pixelBufferToOffscreenCanvas,
@@ -338,10 +355,21 @@ export function App() {
     const buffer = await ensurePixelBuffer();
     if (!buffer) return;
     setOcrDiagnostics({ ...IDLE_OCR_DIAGNOSTICS, stage: "detecting-regions" });
-    const detected = detectDimensionTextRegions(recognitionResult.classification.masks.dimension, buffer.width, buffer.height);
+    const detected = detectDimensionTextRegions(
+      recognitionResult.classification.masks.dimension,
+      buffer.width,
+      buffer.height,
+      {},
+      recognitionResult.axisClustering.axisCentroidsDeg,
+    );
     const guarded = applyAutoRunGuard(detected, DEFAULT_OCR_GUARD_LIMITS);
     if (guarded.message) setOcrGuardMessage(guarded.message);
     await runOcrJob(guarded.accepted);
+    // Session 2B.6 "Compare Both Modes": after Current Region Detection
+    // finishes, immediately prompt the user to draw a Manual Crop too,
+    // so both results land in the same candidate list, each clearly
+    // labeled by `testMode` (never silently merged/assumed the same).
+    if (ocrTestMode === "compare-both") handleRequestManualOcrRegion();
   }
 
   function handleRequestManualOcrRegion() {
@@ -380,13 +408,17 @@ export function App() {
         unit,
         normalizedValueMm: toMillimeters(value, unit),
         componentId: null,
+        elementId: null,
+        axis: "unassigned",
+        axisSource: "user_selected",
+        geometricReference: null,
         property: "custom",
         customPropertyLabel: "ค่าจาก OCR (ยังไม่จัดประเภท)",
         annotation: null,
         reviewStatus: "read",
         provenance: {
-          source: "user_read",
-          note: `ได้จาก OCR อัตโนมัติ (Session 2B) — ข้อความที่อ่านได้: "${candidate.rawText}", ความมั่นใจ: ${
+          source: "ocr_transfer",
+          note: `ได้จาก OCR อัตโนมัติ (Session 2B, Experimental — ไม่ใช่ V1 default workflow) — ข้อความที่อ่านได้: "${candidate.rawText}", ความมั่นใจ: ${
             candidate.confidence === null ? "ไม่ทราบ" : `${candidate.confidence.toFixed(0)}%`
           }, มุม: ${candidate.orientationDeg}°, ตำแหน่งพิกเซล: x=${candidate.region.region.x}, y=${candidate.region.region.y}, w=${candidate.region.region.width}, h=${candidate.region.region.height}. ต้องตรวจกับภาพต้นฉบับก่อนยืนยัน.`,
           timestamp: new Date().toISOString(),
@@ -503,6 +535,18 @@ export function App() {
     setFocusDimensionId(id);
   }
 
+  // Session 3A: a marker tap on the image should open quick-edit in
+  // whichever Dimension-editing tab the user is actually on — the fast
+  // Tap-to-Dimension popup when there, the full form otherwise — rather
+  // than always jumping away to the advanced editor.
+  function handleSelectMarker(id: string) {
+    if (tab === "tap-dimension") {
+      setTapFocusDimensionId(id);
+    } else {
+      focusDimension(id);
+    }
+  }
+
   function focusComponent(id: string) {
     setTab("components");
     setFocusComponentId(id);
@@ -580,7 +624,7 @@ export function App() {
             placement={placement}
             onCancelPlacement={() => setPlacement(null)}
             markers={dimensionMarkers}
-            onSelectMarker={focusDimension}
+            onSelectMarker={handleSelectMarker}
             maskLayers={recognitionMaskLayers}
             lineOverlay={recognitionLineOverlay}
             regionOverlay={ocrRegionOverlay}
@@ -602,6 +646,23 @@ export function App() {
           </nav>
 
           <div className="app__tab-content">
+            {tab === "tap-dimension" && (
+              <TapToDimensionPanel
+                dimensions={project.dimensions}
+                components={project.components}
+                isoAxisCentroidsDeg={recognitionResult?.axisClustering.axisCentroidsDeg ?? null}
+                onAddDimension={(dimension) => dispatch({ type: "ADD_DIMENSION", dimension })}
+                onUpdateDimension={(id, patch) => dispatch({ type: "UPDATE_DIMENSION", id, patch })}
+                onDeleteDimension={(id) => dispatch({ type: "DELETE_DIMENSION", id })}
+                onSetStatus={(id, status) => dispatch({ type: "SET_DIMENSION_STATUS", id, status })}
+                onRequestPointPlacement={requestPointPlacement}
+                onCancelPlacement={() => setPlacement(null)}
+                imageLoaded={!!loadedImage}
+                focusDimensionId={tapFocusDimensionId}
+                onFocusConsumed={() => setTapFocusDimensionId(null)}
+              />
+            )}
+
             {tab === "views" && (
               <ViewManagerPanel
                 views={project.views}
@@ -695,6 +756,10 @@ export function App() {
                 elapsedMs={ocrElapsedMs}
                 guardMessage={ocrGuardMessage}
                 error={ocrError}
+                engine={ocrEngine}
+                onChangeEngine={setOcrEngine}
+                testMode={ocrTestMode}
+                onChangeTestMode={setOcrTestMode}
                 onRunAutoDetection={handleRunOcrAutoDetection}
                 onRequestManualRegion={handleRequestManualOcrRegion}
                 onCancel={handleCancelOcr}

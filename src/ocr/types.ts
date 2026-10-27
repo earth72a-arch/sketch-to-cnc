@@ -1,4 +1,5 @@
 import type { Region } from "../types/project";
+import { DEFAULT_CHAR_GROUPING_OPTIONS, type CharGroupingOptions } from "./characterGrouping";
 
 /**
  * Dimension OCR — core types (Session 2B).
@@ -12,6 +13,22 @@ import type { Region } from "../types/project";
  */
 
 export type OcrUnit = "mm" | "cm";
+
+/** Session 2B.6 — which recognition engine produced a candidate. Always
+ * recorded and shown alongside the result — never switched automatically
+ * without the user explicitly choosing it first. `"paddleocr"` exists in
+ * the type for forward-compatibility with the Engine dropdown's
+ * labeling, but no code path in this session actually runs it: the
+ * investigated `@paddleocr/paddleocr-js` package is reported BLOCKED
+ * (bundled OpenCV.js dependency, no documented iPad Safari support, no
+ * out-of-the-box self-hosting — see the Session 2B.6 final report) and
+ * was never installed. */
+export type OcrEngine = "tesseract" | "paddleocr";
+
+/** Session 2B.6 — which detection/crop strategy produced the region this
+ * candidate was read from, so "fair comparison" results are always
+ * labeled with how the region was obtained, never silently mixed. */
+export type OcrTestMode = "auto-detection" | "manual-crop";
 
 /** How a text region/candidate was produced. */
 export type OcrRegionMethod = "auto-region" | "manual-region";
@@ -77,6 +94,12 @@ export interface OcrCandidate {
    * required by the Session 2B spec; combined with `region`, it is
    * always enough to re-derive the exact crop that produced this text. */
   sourceImageSha256: string;
+  /** Session 2B.6 — which engine produced this candidate. Always set,
+   * never implicit, so mixed-engine comparison results stay labeled. */
+  engine: OcrEngine;
+  /** Session 2B.6 — which detection/crop strategy produced this
+   * candidate's region. Always set, never implicit. */
+  testMode: OcrTestMode;
   /** User-entered correction, if any — kept separate from the raw OCR
    * output so the original evidence is never overwritten. */
   userValue?: number;
@@ -85,9 +108,13 @@ export interface OcrCandidate {
 }
 
 export interface OcrRegionDetectionOptions {
-  /** Pixel gap under which two separate ink components are merged into
-   * one text-region candidate (handles adjacent/connected characters). */
-  charGroupingGapPx: number;
+  /** Session 2B.6 — adaptive character-grouping parameters (see
+   * `characterGrouping.ts`). Replaces the old fixed `charGroupingGapPx`
+   * pixel constant, which split multi-digit numbers whenever a
+   * drawing's actual digit spacing exceeded that one hardcoded value —
+   * every one of these is expressed relative to each pair's own
+   * measured size, never an absolute pixel count. */
+  charGrouping: CharGroupingOptions;
   /** Extra pixels added around each detected cluster's bounding box. */
   paddingPx: number;
   /** A component is treated as a dimension LINE (and excluded from text
@@ -107,7 +134,7 @@ export interface OcrRegionDetectionOptions {
 }
 
 export const DEFAULT_OCR_REGION_OPTIONS: OcrRegionDetectionOptions = {
-  charGroupingGapPx: 14,
+  charGrouping: DEFAULT_CHAR_GROUPING_OPTIONS,
   paddingPx: 6,
   lineLinearityThreshold: 0.9,
   lineMinLengthPx: 40,

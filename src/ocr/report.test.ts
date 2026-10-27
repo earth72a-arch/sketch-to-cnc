@@ -14,6 +14,8 @@ function makeCandidate(overrides: Partial<OcrCandidate> = {}): OcrCandidate {
     alternatives: [],
     status: "read",
     sourceImageSha256: "a".repeat(64),
+    engine: "tesseract",
+    testMode: "auto-detection",
     ...overrides,
   };
 }

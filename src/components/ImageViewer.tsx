@@ -38,6 +38,11 @@ export interface ViewerMarker {
   id: string;
   point: Point;
   label: string;
+  /** Session 3A — Draft vs Confirmed visual distinction (CLAUDE.md §6: a
+   * draft must never look indistinguishable from a confirmed value).
+   * Omitted entirely for markers with no such distinction (e.g. existing
+   * OCR-adjacent flows that don't pass this). */
+  status?: "draft" | "confirmed";
 }
 
 export type PlacementRequest =
@@ -533,7 +538,14 @@ export function ImageViewer({
               )}
               {markers.map((marker) => (
                 <g key={marker.id} transform={`translate(${marker.point.x}, ${marker.point.y})`}>
-                  <circle r={13} className="image-viewer__marker-dot" />
+                  <circle
+                    r={13}
+                    className={
+                      marker.status
+                        ? `image-viewer__marker-dot image-viewer__marker-dot--${marker.status}`
+                        : "image-viewer__marker-dot"
+                    }
+                  />
                   <text y={4} textAnchor="middle" className="image-viewer__marker-label">
                     {marker.label}
                   </text>

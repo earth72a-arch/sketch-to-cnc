@@ -3,9 +3,11 @@ import { generateId } from "../utils/id";
 import { toMillimeters } from "../utils/units";
 import { provenanceSourceForStatus } from "../utils/provenance";
 import { markerRegionCenter, pointToMarkerRegion } from "../utils/markers";
+import { AXIS_LABEL_TH } from "../utils/axisSuggestion";
 import type {
   Component,
   Dimension,
+  DimensionAxis,
   DimensionProperty,
   DrawingView,
   LengthUnit,
@@ -23,6 +25,8 @@ const PROPERTY_OPTIONS: DimensionProperty[] = [
   "spacing",
   "custom",
 ];
+
+const AXIS_OPTIONS: DimensionAxis[] = ["unassigned", "vertical_axis", "iso_axis_a", "iso_axis_b", "custom"];
 
 const STATUS_OPTIONS: ReviewStatus[] = [
   "read",
@@ -53,6 +57,8 @@ interface FormState {
   property: DimensionProperty;
   customPropertyLabel: string;
   componentId: string;
+  axis: DimensionAxis;
+  customAxisLabel: string;
   viewId: string;
   region: Region | null;
   reviewStatus: ReviewStatus;
@@ -65,6 +71,8 @@ const INITIAL_FORM: FormState = {
   property: "width",
   customPropertyLabel: "",
   componentId: "",
+  axis: "unassigned",
+  customAxisLabel: "",
   viewId: "",
   region: null,
   reviewStatus: "read",
@@ -99,6 +107,8 @@ export function DimensionEditorPanel({
       property: dim.property,
       customPropertyLabel: dim.customPropertyLabel ?? "",
       componentId: dim.componentId ?? "",
+      axis: dim.axis,
+      customAxisLabel: dim.customAxisLabel ?? "",
       viewId: dim.annotation?.viewId ?? "",
       region: dim.annotation?.region ?? null,
       reviewStatus: dim.reviewStatus,
@@ -117,12 +127,26 @@ export function DimensionEditorPanel({
     const numericValue = Number(form.value);
     if (!Number.isFinite(numericValue)) return;
 
+    // Session 3B: elementId/geometricReference are not edited by this
+    // form (no Geometry Editor this session) — when editing an existing
+    // record, carry them forward unchanged rather than silently
+    // resetting them to null.
+    const existing = editingId ? dimensions.find((d) => d.id === editingId) : undefined;
+
     const payload: Dimension = {
       id: editingId ?? generateId("dimension"),
       value: numericValue,
       unit: form.unit,
       normalizedValueMm: toMillimeters(numericValue, form.unit),
       componentId: form.componentId || null,
+      elementId: existing?.elementId ?? null,
+      axis: form.axis,
+      // Touching this form is itself a deliberate user action on the
+      // record, including whatever axis it currently shows — never
+      // leaves a prior "suggested" tag stale after an explicit edit.
+      axisSource: "user_selected",
+      customAxisLabel: form.axis === "custom" ? form.customAxisLabel.trim() || undefined : undefined,
+      geometricReference: existing?.geometricReference ?? null,
       property: form.property,
       customPropertyLabel:
         form.property === "custom" ? form.customPropertyLabel.trim() : undefined,
@@ -194,6 +218,27 @@ export function DimensionEditorPanel({
             <input
               value={form.customPropertyLabel}
               onChange={(e) => setForm({ ...form, customPropertyLabel: e.target.value })}
+            />
+          </label>
+        )}
+
+        <label>
+          แกน/ทิศทาง (Axis / Direction)
+          <select value={form.axis} onChange={(e) => setForm({ ...form, axis: e.target.value as DimensionAxis })}>
+            {AXIS_OPTIONS.map((a) => (
+              <option key={a} value={a}>
+                {AXIS_LABEL_TH[a]}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {form.axis === "custom" && (
+          <label>
+            ชื่อทิศทาง (Custom Direction Label)
+            <input
+              value={form.customAxisLabel}
+              onChange={(e) => setForm({ ...form, customAxisLabel: e.target.value })}
             />
           </label>
         )}
@@ -296,6 +341,8 @@ export function DimensionEditorPanel({
                 </strong>{" "}
                 ({d.property === "custom" ? d.customPropertyLabel : d.property}) →{" "}
                 {component ? component.name : "(ยังไม่ผูก component)"}
+                {" · Axis: "}
+                {d.axis === "custom" ? d.customAxisLabel || "Custom" : AXIS_LABEL_TH[d.axis]}
                 {" · "}
                 <span className={`status-badge status-badge--${d.reviewStatus}`}>
                   {d.reviewStatus}

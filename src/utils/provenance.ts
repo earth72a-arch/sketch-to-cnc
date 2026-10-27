@@ -17,3 +17,13 @@ export function provenanceSourceForStatus(status: ReviewStatus): ProvenanceSourc
       return "user_read";
   }
 }
+
+/** Session 3A — same confirmed/unconfirmed mapping as
+ * `provenanceSourceForStatus`, but tags the unconfirmed case as
+ * `"tap_to_dimension"` instead of the generic `"user_read"`, so a
+ * dimension entered via Tap-to-Dimension stays distinguishable from one
+ * typed directly into the Dimension Editor form or transferred from an
+ * OCR candidate (CLAUDE.md: provenance must always be traceable). */
+export function provenanceSourceForTapInput(status: ReviewStatus): ProvenanceSource {
+  return status === "confirmed" ? "user_confirmed" : "tap_to_dimension";
+}
