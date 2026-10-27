@@ -49,7 +49,17 @@ import {
 } from "./ocr/types";
 
 const TESSERACT_WORKER_PATH = `${import.meta.env.BASE_URL}tesseract/worker.min.js`;
-const TESSERACT_CORE_PATH = `${import.meta.env.BASE_URL}tesseract/core/tesseract-core-lstm.js`;
+// Session 2B.3: the core .js loader and its sibling .wasm binary MUST sit
+// in the SAME directory as worker.min.js. Emscripten's generated loader
+// resolves the .wasm file's URL relative to the executing worker's own
+// `self.location` (worker.min.js's URL), not relative to the dynamically
+// `importScripts()`-loaded core .js file's own location — putting the
+// core files one level deeper (tesseract/core/) made that resolution
+// silently drop the `core/` segment, which only ever surfaces as a
+// browser network/MIME error, never in Node (Node's core loader ignores
+// corePath entirely and requires the npm package directly instead — see
+// the Session 2B.3 report for the real-Chrome evidence).
+const TESSERACT_CORE_PATH = `${import.meta.env.BASE_URL}tesseract/tesseract-core-lstm.js`;
 const TESSERACT_LANG_PATH = `${import.meta.env.BASE_URL}tesseract/lang-data`;
 
 type Tab =
