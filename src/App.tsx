@@ -25,7 +25,7 @@ import { slugifyFileName } from "./utils/filename";
 import type { ValidationIssue } from "./utils/validation";
 import type { Point, ProjectFile, Region } from "./types/project";
 import { createDefaultPalette } from "./recognition/palette";
-import { runRecognitionPipeline } from "./recognition/pipeline";
+import { DEFAULT_RECOGNITION_OPTIONS, runRecognitionPipeline } from "./recognition/pipeline";
 import { loadPixelBufferFromUrl } from "./recognition/imageDataAdapter";
 import { buildRecognitionReport, serializeRecognitionReport } from "./recognition/report";
 import type { ColorCategory, Palette, PixelBuffer, RecognitionResult } from "./recognition/types";
@@ -147,7 +147,7 @@ export function App() {
         sha256: project.sourceImage?.sha256 ?? "",
       },
       palette,
-      { gapPx: 3, minLinearity: 0.8, minLengthPx: 8, minPixelCount: 5, maxAxisAssignDeltaDeg: 20 },
+      DEFAULT_RECOGNITION_OPTIONS,
     );
     triggerJsonDownload(
       `${slugifyFileName(project.projectName)}.recognition-report.json`,

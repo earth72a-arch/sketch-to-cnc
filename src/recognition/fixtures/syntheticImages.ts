@@ -100,6 +100,55 @@ export function buildSyntheticLineImage(options: {
   return buffer;
 }
 
+/**
+ * Draws a connected polyline (each consecutive pair of points is one
+ * stroke segment) — used to build L/T/X-join and frame fixtures for
+ * Session 2A.1's touching/crossing-line regression tests. Unlike
+ * buildSyntheticLineImage's independent `lines`, these segments are
+ * meant to touch/overlap at shared vertices, exercising junction
+ * splitting rather than per-segment isolation.
+ */
+export function drawSyntheticPolyline(
+  buffer: PixelBuffer,
+  points: Array<{ x: number; y: number }>,
+  color: RGB,
+  thicknessPx = 3,
+): void {
+  for (let i = 0; i < points.length - 1; i++) {
+    drawSyntheticLine(buffer, {
+      x1: points[i].x,
+      y1: points[i].y,
+      x2: points[i + 1].x,
+      y2: points[i + 1].y,
+      color,
+      thicknessPx,
+    });
+  }
+}
+
+/** Draws a closed rectangle outline (axis-aligned) as one touching stroke
+ * network — no junction pixels anywhere, only corner bends, which is
+ * exactly the shape that caused Session 2A's "whole cabinet frame
+ * rejected as not a line" bug. */
+export function drawSyntheticRect(
+  buffer: PixelBuffer,
+  spec: { x: number; y: number; width: number; height: number; color: RGB; thicknessPx?: number },
+): void {
+  const { x, y, width, height, color, thicknessPx } = spec;
+  drawSyntheticPolyline(
+    buffer,
+    [
+      { x, y },
+      { x: x + width, y },
+      { x: x + width, y: y + height },
+      { x, y: y + height },
+      { x, y },
+    ],
+    color,
+    thicknessPx,
+  );
+}
+
 /** Draws a filled disk — an isotropic blob, used to prove the pipeline
  * rejects non-line shapes instead of reporting a fake line through them. */
 export function drawSyntheticFilledDisk(

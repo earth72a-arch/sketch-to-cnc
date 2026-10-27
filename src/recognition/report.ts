@@ -3,7 +3,7 @@ import type { ColorCategory, Palette, RecognitionResult } from "./types";
 import type { RecognitionOptions } from "./pipeline";
 import { rgbToHex } from "./colorHex";
 
-export const RECOGNITION_ALGORITHM_VERSION = "session2a-color-iso-v1";
+export const RECOGNITION_ALGORITHM_VERSION = "session2a1-skeleton-line-v1";
 const REPORT_SCHEMA_VERSION = "1.0.0";
 
 export interface RecognitionImageMeta {

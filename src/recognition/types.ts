@@ -90,6 +90,9 @@ export interface FittedLine {
   lengthPx: number;
   /** 0 (isotropic blob) .. 1 (perfectly straight). */
   linearity: number;
+  /** Skeleton-chain point count for this specific segment (Session
+   * 2A.1) — not the whole original stroke's ink pixel count, since the
+   * skeleton is 1px wide regardless of stroke thickness. */
   pixelCount: number;
 }
 
